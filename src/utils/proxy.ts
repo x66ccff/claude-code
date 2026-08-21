@@ -168,9 +168,27 @@ function createHttpsProxyAgent(
 export function createAxiosInstance(
   extra: HttpsProxyAgentOptions<string> = {},
 ): AxiosInstance {
-  const proxyUrl = getProxyUrl()
+  return createAxiosInstanceForProxy(getProxyUrl(), getNoProxy(), extra)
+}
+
+/**
+ * Create an Axios instance whose proxy policy is isolated from the process-wide
+ * HTTP proxy configuration. This is useful for one subsystem (for example
+ * WebFetch) that should use a dedicated proxy without rerouting model-provider
+ * API calls or other Claude Code traffic.
+ */
+export function createAxiosInstanceForProxy(
+  proxyUrl: string | undefined,
+  noProxy: string | undefined,
+  extra: HttpsProxyAgentOptions<string> = {},
+): AxiosInstance {
   const mtlsAgent = getMTLSAgent()
   const instance = axios.create({ proxy: false })
+
+  // axios.create() inherits global defaults, including agents installed by
+  // configureGlobalAgents(). Remove them so this instance is truly scoped.
+  delete instance.defaults.httpAgent
+  delete instance.defaults.httpsAgent
 
   if (!proxyUrl) {
     if (mtlsAgent) instance.defaults.httpsAgent = mtlsAgent
@@ -179,7 +197,7 @@ export function createAxiosInstance(
 
   const proxyAgent = createHttpsProxyAgent(proxyUrl, extra)
   instance.interceptors.request.use(config => {
-    if (config.url && shouldBypassProxy(config.url)) {
+    if (config.url && shouldBypassProxy(config.url, noProxy)) {
       config.httpsAgent = mtlsAgent
       config.httpAgent = mtlsAgent
     } else {

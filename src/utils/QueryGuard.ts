@@ -11,7 +11,7 @@
  *   idle → dispatching  (reserve)
  *   dispatching → running  (tryStart)
  *   idle → running  (tryStart, for direct user submissions)
- *   running → idle  (end / forceEnd)
+ *   running → idle  (end; forceEnd is reserved for teardown paths)
  *   dispatching → idle  (cancelReservation, when processQueueIfReady fails)
  *
  * `isActive` returns true for both dispatching and running, preventing
@@ -81,7 +81,9 @@ export class QueryGuard {
 
   /**
    * Force-end the current query regardless of generation.
-   * Used by onCancel where any running query should be terminated.
+   * Reserved for teardown paths that will not start another query. Interactive
+   * cancellation must keep the guard active until the old query settles, or a
+   * replacement request can overlap transport cleanup.
    * Increments generation so stale finally blocks from the cancelled
    * query's promise rejection will see a mismatch and skip cleanup.
    */

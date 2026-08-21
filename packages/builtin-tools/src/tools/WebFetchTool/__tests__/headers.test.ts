@@ -29,6 +29,14 @@ let getMock: (url: string) => Promise<MockAxiosResponse>
 
 const axiosHandle = setupAxiosMock()
 axiosHandle.stubs.get = (url: string) => getMock(url)
+// WebFetch uses an isolated axios instance so its proxy policy cannot leak into
+// model-provider traffic. Mirror axios.create() here instead of accidentally
+// falling through to a real network client during tests.
+axiosHandle.stubs.create = () => ({
+  get: (url: string) => getMock(url),
+  defaults: {},
+  interceptors: { request: { use: () => undefined } },
+})
 axiosHandle.stubs.isAxiosError = (error: unknown): boolean =>
   typeof error === 'object' &&
   error !== null &&

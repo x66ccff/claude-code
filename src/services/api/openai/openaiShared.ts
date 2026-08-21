@@ -21,12 +21,14 @@ export function updateOpenAIUsage(
     output_tokens: number
     cache_creation_input_tokens: number
     cache_read_input_tokens: number
+    thinking_tokens?: number
   },
   delta: {
     input_tokens?: number
     output_tokens?: number
     cache_creation_input_tokens?: number
     cache_read_input_tokens?: number
+    thinking_tokens?: number
   },
 ): typeof current {
   return {
@@ -42,5 +44,6 @@ export function updateOpenAIUsage(
       delta.cache_read_input_tokens > 0
         ? delta.cache_read_input_tokens
         : current.cache_read_input_tokens,
+    thinking_tokens: delta.thinking_tokens ?? current.thinking_tokens,
   }
 }

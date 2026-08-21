@@ -9,7 +9,7 @@ import type { LocalJSXCommandCall, LocalJSXCommandContext } from '../../types/co
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type SearchAdapterKey = 'tavily' | 'api' | 'bing' | 'brave' | 'exa';
+type SearchAdapterKey = 'serper' | 'tavily' | 'api' | 'bing' | 'brave' | 'exa';
 type FetchAdapterKey = 'tavily' | 'http';
 
 interface AdapterMeta {
@@ -20,7 +20,7 @@ interface AdapterMeta {
 }
 
 type SettingsJson = Record<string, unknown> & {
-  webSearchAdapter?: 'api' | 'bing' | 'brave' | 'exa' | 'tavily';
+  webSearchAdapter?: 'api' | 'bing' | 'brave' | 'exa' | 'serper' | 'tavily';
   webFetchAdapter?: 'tavily' | 'http';
   tavilyEndpointUrl?: string;
   braveApiKey?: string;
@@ -34,7 +34,13 @@ type ViewState = { kind: 'main' } | { kind: 'config'; adapter: AdapterMeta };
 // ── Data ───────────────────────────────────────────────────────────────────
 
 const SEARCH_ADAPTERS: AdapterMeta[] = [
-  { key: 'tavily', label: 'Tavily', description: 'Tavily Search API (default)', hasConfig: true },
+  {
+    key: 'serper',
+    label: 'Serper',
+    description: 'Serper Google Search API (default; uses SERPER_API_KEY)',
+    hasConfig: false,
+  },
+  { key: 'tavily', label: 'Tavily', description: 'Tavily Search API', hasConfig: true },
   { key: 'api', label: 'Anthropic API', description: 'Anthropic server-side web search', hasConfig: false },
   { key: 'bing', label: 'Bing', description: 'Scrape Bing HTML results', hasConfig: false },
   { key: 'brave', label: 'Brave', description: 'Brave Search API (needs API key)', hasConfig: true },
@@ -42,8 +48,13 @@ const SEARCH_ADAPTERS: AdapterMeta[] = [
 ];
 
 const FETCH_ADAPTERS: AdapterMeta[] = [
-  { key: 'tavily', label: 'Tavily Extract', description: 'Use Tavily /extract (default)', hasConfig: true },
-  { key: 'http', label: 'HTTP Direct', description: 'Fetch URL directly via HTTP', hasConfig: true },
+  {
+    key: 'http',
+    label: 'HTTP + VPN',
+    description: 'Fetch through the dedicated WebFetch proxy (default)',
+    hasConfig: true,
+  },
+  { key: 'tavily', label: 'Tavily Extract', description: 'Use Tavily /extract', hasConfig: true },
 ];
 
 // ── Config field definitions ───────────────────────────────────────────────
@@ -477,8 +488,11 @@ function WebToolsPanel({
   const [view, setView] = useState<ViewState>({ kind: 'main' });
 
   const settings = getSettings_DEPRECATED() as unknown as SettingsJson;
-  const currentSearch = settings.webSearchAdapter ?? 'tavily';
-  const currentFetch = settings.webFetchAdapter ?? 'tavily';
+  const envSearchAdapter = process.env.WEB_SEARCH_ADAPTER;
+  const currentSearch = SEARCH_ADAPTERS.some(a => a.key === envSearchAdapter)
+    ? envSearchAdapter!
+    : (settings.webSearchAdapter ?? 'serper');
+  const currentFetch = settings.webFetchAdapter ?? 'http';
 
   const insideModal = useIsInsideModal();
   const { rows } = useTerminalSize();

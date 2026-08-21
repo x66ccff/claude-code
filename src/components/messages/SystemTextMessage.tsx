@@ -45,7 +45,7 @@ export function SystemTextMessage({ message, addMargin, verbose, isTranscriptMod
   const bg = useSelectedMessageBg();
   // Turn duration messages are always shown in grey
   if (message.subtype === 'turn_duration') {
-    return <TurnDurationMessage message={message} addMargin={addMargin} />;
+    return <TurnDurationMessage message={message as SystemTurnDurationMessage} addMargin={addMargin} />;
   }
 
   if (message.subtype === 'memory_saved') {
@@ -320,6 +320,17 @@ function TurnDurationMessage({
     return `${showTurnDuration ? ' \u00B7 ' : ''}${usage}${nudges}`;
   })();
 
+  const tokenSuffix = (() => {
+    if (message.outputTokens === undefined) return '';
+    const parts = [`${formatNumber(message.outputTokens)} output`];
+    const thinkingTokens = message.thinkingTokens;
+    if (thinkingTokens !== undefined && thinkingTokens > 0) {
+      const estimateMarker = message.thinkingTokensEstimated ? '~' : '';
+      parts.push(`${estimateMarker}${formatNumber(thinkingTokens)} thinking`);
+    }
+    return ` \u00B7 ${parts.join(' \u00B7 ')}`;
+  })();
+
   if (!showTurnDuration && !hasBudget) {
     return null;
   }
@@ -332,6 +343,7 @@ function TurnDurationMessage({
       <Text dimColor>
         {showTurnDuration && `${verb} for ${duration}`}
         {budgetSuffix}
+        {tokenSuffix}
         {backgroundTaskSummary && ` \u00B7 ${backgroundTaskSummary} still running`}
       </Text>
     </Box>

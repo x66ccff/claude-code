@@ -56,3 +56,4 @@ credentials.json
 .test-progress.md
 .squash-tmp/
 .git.*-backup
+.public-export-local-patterns

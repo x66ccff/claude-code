@@ -215,7 +215,9 @@ ${DESCRIPTION}`
 
     // Select backend: settings.webFetchAdapter → default 'tavily'
     const settings = getSettings_DEPRECATED()
-    const backend = settings.webFetchAdapter ?? 'tavily'
+    // Direct HTTP honors CLAUDE_CODE_WEB_FETCH_PROXY. Tavily remains an
+    // explicit opt-in through /web-tools.
+    const backend = settings.webFetchAdapter ?? 'http'
 
     // Tavily path: /extract returns Markdown directly — skip turndown + queryHaiku
     if (backend === 'tavily') {

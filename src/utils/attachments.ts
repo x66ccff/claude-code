@@ -1828,12 +1828,12 @@ export function memoryFilesToAttachments(
 
 /**
  * Loads nested memory files for a given file path and returns them as attachments.
- * This function performs directory traversal to find CLAUDE.md files and conditional rules
+ * This function performs directory traversal to find project instruction files and conditional rules
  * that apply to the target file path.
  *
  * Processing order (must be preserved):
  * 1. Managed/User conditional rules matching targetPath
- * 2. Nested directories (CWD → target): CLAUDE.md + unconditional + conditional rules
+ * 2. Nested directories (CWD → target): CLAUDE.md + AGENTS.md + unconditional + conditional rules
  * 3. CWD-level directories (root → CWD): conditional rules only
  *
  * @param filePath The file path to get nested memory files for
@@ -1878,7 +1878,7 @@ async function getNestedMemoryAttachmentsForFile(
     )
 
     // Phase 3: Process nested directories (CWD → target)
-    // Each directory gets: CLAUDE.md + unconditional rules + conditional rules
+    // Each directory gets: CLAUDE.md + AGENTS.md + unconditional rules + conditional rules
     for (const dir of nestedDirs) {
       const memoryFiles = (
         await getMemoryFilesForNestedDirectory(dir, filePath, processedPaths)

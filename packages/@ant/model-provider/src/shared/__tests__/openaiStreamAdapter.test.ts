@@ -310,7 +310,7 @@ describe('adaptOpenAIStreamToAnthropic', () => {
   })
 })
 
-describe('thinking support (reasoning_content)', () => {
+describe('thinking support (reasoning_content / reasoning)', () => {
   test('converts reasoning_content to thinking block', async () => {
     const events = await collectEvents([
       makeChunk({
@@ -349,6 +349,75 @@ describe('thinking support (reasoning_content)', () => {
     expect(thinkingDeltas.length).toBe(2)
     expect(thinkingDeltas[0].delta.thinking).toBe('Let me analyze this...')
     expect(thinkingDeltas[1].delta.thinking).toBe(' step by step.')
+  })
+
+  test('converts vLLM reasoning alias to Claude thinking events', async () => {
+    const events = await collectEvents([
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning: 'vLLM is reasoning...' },
+            finish_reason: null,
+          },
+        ],
+      }),
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { content: 'Final answer.' },
+            finish_reason: null,
+          },
+        ],
+      }),
+      makeChunk({
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      }),
+    ])
+
+    const blockStarts = events.filter(
+      event => event.type === 'content_block_start',
+    ) as any[]
+    expect(blockStarts.map(event => event.content_block.type)).toEqual([
+      'thinking',
+      'text',
+    ])
+
+    const thinkingDelta = events.find(
+      event =>
+        event.type === 'content_block_delta' &&
+        event.delta.type === 'thinking_delta',
+    ) as any
+    expect(thinkingDelta.delta.thinking).toBe('vLLM is reasoning...')
+  })
+
+  test('prefers reasoning_content when a provider sends both aliases', async () => {
+    const events = await collectEvents([
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: {
+              reasoning_content: 'canonical',
+              reasoning: 'duplicate alias',
+            },
+            finish_reason: null,
+          },
+        ],
+      }),
+      makeChunk({
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      }),
+    ])
+
+    const thinkingDeltas = events.filter(
+      event =>
+        event.type === 'content_block_delta' &&
+        event.delta.type === 'thinking_delta',
+    ) as any[]
+    expect(thinkingDeltas).toHaveLength(1)
+    expect(thinkingDeltas[0].delta.thinking).toBe('canonical')
   })
 
   test('converts reasoning then content (DeepSeek-style)', async () => {
@@ -439,12 +508,7 @@ describe('thinking support (reasoning_content)', () => {
     expect(blockStarts[1].content_block.type).toBe('tool_use')
   })
 
-  test('opens thinking block on empty reasoning_content (DeepSeek v4 direct-answer)', async () => {
-    // DeepSeek v4 thinking mode sometimes streams reasoning_content: ""
-    // before answering directly. We must still open a thinking block so the
-    // resulting assistant message carries an (empty) thinking block — that
-    // round-trips back as reasoning_content: "" in the next request,
-    // satisfying DeepSeek's requirement (see issue #399).
+  test('opens thinking block on empty reasoning_content', async () => {
     const events = await collectEvents([
       makeChunk({
         choices: [
@@ -469,22 +533,19 @@ describe('thinking support (reasoning_content)', () => {
       }),
     ])
 
-    // A thinking block was opened (and closed before the text block starts)
     const blockStarts = events.filter(
-      e => e.type === 'content_block_start',
+      event => event.type === 'content_block_start',
     ) as any[]
-    expect(blockStarts.length).toBe(2)
-    expect(blockStarts[0].content_block.type).toBe('thinking')
-    expect(blockStarts[0].content_block.thinking).toBe('')
-    expect(blockStarts[1].content_block.type).toBe('text')
-
-    // No empty thinking_delta should be emitted — the empty string is
-    // already conveyed by the thinking block's initial value.
+    expect(blockStarts.map(event => event.content_block.type)).toEqual([
+      'thinking',
+      'text',
+    ])
     const thinkingDeltas = events.filter(
-      e =>
-        e.type === 'content_block_delta' && e.delta.type === 'thinking_delta',
+      event =>
+        event.type === 'content_block_delta' &&
+        event.delta.type === 'thinking_delta',
     )
-    expect(thinkingDeltas.length).toBe(0)
+    expect(thinkingDeltas).toHaveLength(0)
   })
 
   test('thinking block index is 0, text block index is 1', async () => {
@@ -551,7 +612,6 @@ describe('prompt caching support', () => {
 
     const msgStart = events.find(e => e.type === 'message_start') as any
     expect(msgStart.message.usage.cache_read_input_tokens).toBe(800)
-    // input_tokens = prompt_tokens - cached_tokens = 1000 - 800 = 200
     expect(msgStart.message.usage.input_tokens).toBe(200)
   })
 
@@ -631,6 +691,33 @@ describe('prompt caching support', () => {
     expect(msgDelta.usage.input_tokens).toBe(123)
     expect(msgDelta.usage.output_tokens).toBe(45)
     expect(msgDelta.delta.stop_reason).toBe('end_turn')
+  })
+
+  test('maps reported reasoning_tokens to thinking_tokens', async () => {
+    const events = await collectEvents([
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning: 'thinking' },
+            finish_reason: 'stop',
+          },
+        ],
+      }),
+      makeChunk({
+        choices: [],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 40,
+          total_tokens: 140,
+          completion_tokens_details: { reasoning_tokens: 32 },
+        },
+      }),
+    ])
+
+    const msgDelta = events.find(event => event.type === 'message_delta') as any
+    expect(msgDelta.usage.output_tokens).toBe(40)
+    expect(msgDelta.usage.thinking_tokens).toBe(32)
   })
 
   test('captures input_tokens from trailing chunk (used by tokenCountWithEstimation for autocompact)', async () => {
@@ -751,7 +838,6 @@ describe('prompt caching support', () => {
 
     // message_delta carries the real values from the trailing chunk
     const msgDelta = events.find(e => e.type === 'message_delta') as any
-    // input_tokens = prompt_tokens - cached_tokens = 30011 - 19904 = 10107
     expect(msgDelta.usage.input_tokens).toBe(10107)
     expect(msgDelta.usage.output_tokens).toBe(190)
     expect(msgDelta.usage.cache_read_input_tokens).toBe(19904)
@@ -823,15 +909,11 @@ describe('prompt caching support', () => {
 
     const msgDelta = events.find(e => e.type === 'message_delta') as any
     expect(msgDelta.usage.cache_read_input_tokens).toBe(1500)
-    // input_tokens = prompt_tokens - cached_tokens = 2000 - 1500 = 500
     expect(msgDelta.usage.input_tokens).toBe(500)
     expect(msgDelta.usage.output_tokens).toBe(100)
   })
 
-  test('subtracts cached_tokens from input_tokens to match Anthropic semantic', async () => {
-    // Anthropic's input_tokens = non-cached tokens only.
-    // OpenAI's prompt_tokens = total input including cached.
-    // The adapter must subtract: input_tokens = prompt_tokens - cached_tokens.
+  test('subtracts cached_tokens from input_tokens to match Anthropic semantics', async () => {
     const events = await collectEvents([
       makeChunk({
         choices: [{ index: 0, delta: { content: 'hi' }, finish_reason: null }],
@@ -848,7 +930,6 @@ describe('prompt caching support', () => {
     ])
 
     const msgDelta = events.find(e => e.type === 'message_delta') as any
-    // input_tokens = 34097 - 34048 = 49 (non-cached input only)
     expect(msgDelta.usage.input_tokens).toBe(49)
     expect(msgDelta.usage.cache_read_input_tokens).toBe(34048)
     expect(msgDelta.usage.output_tokens).toBe(30)

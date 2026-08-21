@@ -18,8 +18,10 @@ import { useKeybindings } from '../keybindings/useKeybinding.js';
 import { useAppState, useSetAppState } from '../state/AppState.js';
 import {
   convertEffortValueToLevel,
+  cycleModelPickerEffortLevel,
   type EffortLevel,
   getDefaultEffortForModel,
+  getModelPickerEffortLevels,
   modelSupportsEffort,
   modelSupportsMaxEffort,
   modelSupportsXhighEffort,
@@ -149,6 +151,7 @@ export function ModelPicker({
   const focusedSupportsEffort = focusedModel ? modelSupportsEffort(focusedModel) : false;
   const focusedSupportsXhigh = focusedModel ? modelSupportsXhighEffort(focusedModel) : false;
   const focusedSupportsMax = focusedModel ? modelSupportsMaxEffort(focusedModel) : false;
+  const focusedEffortLevels = useMemo(() => getModelPickerEffortLevels(focusedSupportsMax), [focusedSupportsMax]);
   const focusedDefaultEffort = getDefaultEffortLevelForOption(focusedValue);
   // Clamp display when selected effort isn't supported by the focused model.
   // resolveAppliedEffort() does the same downgrade at API-send time.
@@ -175,12 +178,10 @@ export function ModelPicker({
   const handleCycleEffort = useCallback(
     (direction: 'left' | 'right') => {
       if (!focusedSupportsEffort) return;
-      setEffort(prev =>
-        cycleEffortLevel(prev ?? focusedDefaultEffort, direction, focusedSupportsXhigh, focusedSupportsMax),
-      );
+      setEffort(prev => cycleModelPickerEffortLevel(prev ?? focusedDefaultEffort, direction, focusedEffortLevels));
       setHasToggledEffort(true);
     },
-    [focusedSupportsEffort, focusedSupportsXhigh, focusedSupportsMax, focusedDefaultEffort],
+    [focusedSupportsEffort, focusedDefaultEffort, focusedEffortLevels],
   );
 
   useKeybindings(
@@ -342,30 +343,6 @@ function resolveOptionModel(value?: string): string | undefined {
 
 function EffortLevelIndicator({ effort }: { effort?: EffortLevel }): React.ReactNode {
   return <Text color={effort ? 'claude' : 'subtle'}>{effortLevelToSymbol(effort ?? 'low')}</Text>;
-}
-
-function cycleEffortLevel(
-  current: EffortLevel,
-  direction: 'left' | 'right',
-  includeXhigh: boolean,
-  includeMax: boolean,
-): EffortLevel {
-  const levels: EffortLevel[] = [
-    'low',
-    'medium',
-    'high',
-    ...(includeXhigh ? (['xhigh'] as const) : []),
-    ...(includeMax ? (['max'] as const) : []),
-  ];
-  // If the current level isn't in the cycle (e.g. 'max' after switching to a
-  // non-Opus model), clamp to 'high'.
-  const idx = levels.indexOf(current);
-  const currentIndex = idx !== -1 ? idx : levels.indexOf('high');
-  if (direction === 'right') {
-    return levels[(currentIndex + 1) % levels.length]!;
-  } else {
-    return levels[(currentIndex - 1 + levels.length) % levels.length]!;
-  }
 }
 
 function getDefaultEffortLevelForOption(value?: string): EffortLevel {

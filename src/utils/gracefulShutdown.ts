@@ -229,6 +229,39 @@ function forceExit(exitCode: number): never {
 }
 
 /**
+ * Last-resort exit used only after the graceful-shutdown budget expires or a
+ * second termination signal arrives. Bun's process.exit() can itself block
+ * while a native HTTP stream is wedged, so POSIX builds must not depend on it
+ * for the final failsafe.
+ */
+function forceExitImmediately(exitCode: number): never {
+  if ((process.env.NODE_ENV as string) === 'test') {
+    return forceExit(exitCode)
+  }
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(process.pid, 'SIGKILL')
+    } catch {
+      // Fall through to the portable path.
+    }
+  }
+  return forceExit(exitCode)
+}
+
+function armShutdownFailsafe(exitCode: number, timeoutMs: number): void {
+  if (failsafeTimer !== undefined) clearTimeout(failsafeTimer)
+  failsafeTimer = setTimeout(
+    code => {
+      cleanupTerminalModes()
+      printResumeHint()
+      forceExitImmediately(code)
+    },
+    timeoutMs,
+    exitCode,
+  )
+}
+
+/**
  * Set up global signal handlers for graceful shutdown
  */
 export const setupGracefulShutdown = memoize(() => {
@@ -251,6 +284,11 @@ export const setupGracefulShutdown = memoize(() => {
   onExit(() => {})
 
   process.on('SIGINT', () => {
+    if (isShuttingDown()) {
+      cleanupTerminalModes()
+      printResumeHint()
+      forceExitImmediately(130)
+    }
     // In print mode, print.ts registers its own SIGINT handler that aborts
     // the in-flight query and calls gracefulShutdown(0); skip here to
     // avoid racing with it. Only check print mode — other non-interactive
@@ -263,11 +301,21 @@ export const setupGracefulShutdown = memoize(() => {
     void gracefulShutdown(0)
   })
   process.on('SIGTERM', () => {
+    if (isShuttingDown()) {
+      cleanupTerminalModes()
+      printResumeHint()
+      forceExitImmediately(143)
+    }
     logForDiagnosticsNoPII('info', 'shutdown_signal', { signal: 'SIGTERM' })
     void gracefulShutdown(143) // Exit code 143 (128 + 15) for SIGTERM
   })
   if (process.platform !== 'win32') {
     process.on('SIGHUP', () => {
+      if (isShuttingDown()) {
+        cleanupTerminalModes()
+        printResumeHint()
+        forceExitImmediately(129)
+      }
       logForDiagnosticsNoPII('info', 'shutdown_signal', { signal: 'SIGHUP' })
       void gracefulShutdown(129) // Exit code 129 (128 + 1) for SIGHUP
     })
@@ -400,6 +448,10 @@ export async function gracefulShutdown(
   }
   shutdownInProgress = true
 
+  // Cover the dynamic import itself. Previously the failsafe was armed only
+  // after this await, leaving an unbounded shutdown gap during a wedged turn.
+  armShutdownFailsafe(exitCode, 5000)
+
   // Resolve the SessionEnd hook budget before arming the failsafe so the
   // failsafe can scale with it. Without this, a user-configured 10s hook
   // budget is silently truncated by the 5s failsafe (gh-32712 follow-up).
@@ -411,16 +463,7 @@ export async function gracefulShutdown(
   // Failsafe: guarantee process exits even if cleanup hangs (e.g., MCP connections).
   // Runs cleanupTerminalModes first so a hung cleanup doesn't leave the terminal dirty.
   // Budget = max(5s, hook budget + 3.5s headroom for cleanup + analytics flush).
-  failsafeTimer = setTimeout(
-    code => {
-      cleanupTerminalModes()
-      printResumeHint()
-      forceExit(code)
-    },
-    Math.max(5000, sessionEndTimeoutMs + 3500),
-    exitCode,
-  )
-  failsafeTimer.unref()
+  armShutdownFailsafe(exitCode, Math.max(5000, sessionEndTimeoutMs + 3500))
 
   // Set the exit code that will be used when process naturally exits
   process.exitCode = exitCode

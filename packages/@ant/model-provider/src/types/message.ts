@@ -127,7 +127,14 @@ export type SystemStopHookSummaryMessage = Message & {
   hookInfos: StopHookInfo[]
 }
 
-export type SystemTurnDurationMessage = Message & { type: 'system' }
+export type SystemTurnDurationMessage = Message & {
+  type: 'system'
+  subtype: 'turn_duration'
+  durationMs: number
+  outputTokens?: number
+  thinkingTokens?: number
+  thinkingTokensEstimated?: boolean
+}
 
 export type GroupedToolUseMessage = Message & {
   type: 'grouped_tool_use'

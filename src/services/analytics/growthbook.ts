@@ -451,7 +451,9 @@ const LOCAL_GATE_DEFAULTS: Record<string, unknown> = {
   tengu_moth_copse: true, // Skip memory index, use prefetched memories
   tengu_coral_fern: true, // "Searching past context" section
   tengu_chomp_inflection: true, // Prompt suggestions
-  tengu_hive_evidence: true, // Verification agent
+  // Verification agent is intentionally opt-out at the local gate layer.
+  // It adds an expensive verifier pass after ordinary task completion.
+  tengu_hive_evidence: false,
   tengu_kairos_brief: true, // Brief mode
   tengu_kairos_brief_config: { enable_slash_command: true }, // Brief /slash command visibility
   tengu_sedge_lantern: true, // Away summary

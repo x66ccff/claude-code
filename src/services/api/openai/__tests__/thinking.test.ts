@@ -2,6 +2,7 @@ import { describe, expect, test, beforeEach, afterEach, mock } from 'bun:test'
 import {
   isOpenAIThinkingEnabled,
   buildOpenAIRequestBody,
+  shouldReportOpenAIUsageCost,
 } from '../requestBody.js'
 
 // Re-register envUtils.js with correct isEnvDefinedFalsy and isEnvTruthy to
@@ -21,6 +22,28 @@ mock.module('src/utils/envUtils.js', () => ({
     return ['0', 'false', 'no', 'off'].includes(v.toLowerCase().trim())
   },
 }))
+
+describe('shouldReportOpenAIUsageCost', () => {
+  const originalValue = process.env.CLAUDE_CODE_OPENAI_LOCAL_ZERO_COST
+
+  afterEach(() => {
+    if (originalValue === undefined) {
+      delete process.env.CLAUDE_CODE_OPENAI_LOCAL_ZERO_COST
+    } else {
+      process.env.CLAUDE_CODE_OPENAI_LOCAL_ZERO_COST = originalValue
+    }
+  })
+
+  test('reports normal provider cost by default', () => {
+    delete process.env.CLAUDE_CODE_OPENAI_LOCAL_ZERO_COST
+    expect(shouldReportOpenAIUsageCost()).toBe(true)
+  })
+
+  test('suppresses estimated provider cost only when explicitly enabled', () => {
+    process.env.CLAUDE_CODE_OPENAI_LOCAL_ZERO_COST = '1'
+    expect(shouldReportOpenAIUsageCost()).toBe(false)
+  })
+})
 
 describe('isOpenAIThinkingEnabled', () => {
   const originalEnv = {
@@ -226,6 +249,26 @@ describe('buildOpenAIRequestBody — thinking params', () => {
     expect(body.chat_template_kwargs!.thinking).toBe(true)
   })
 
+  test('passes low effort through both vLLM request paths', () => {
+    const body = buildOpenAIRequestBody({
+      ...baseParams,
+      enableThinking: true,
+      reasoningEffort: 'low',
+    })
+    expect(body.reasoning_effort).toBe('low')
+    expect(body.chat_template_kwargs!.reasoning_effort).toBe('low')
+  })
+
+  test('maps max to xhigh while preserving the native template label', () => {
+    const body = buildOpenAIRequestBody({
+      ...baseParams,
+      enableThinking: true,
+      reasoningEffort: 'max',
+    })
+    expect(body.reasoning_effort).toBe('xhigh')
+    expect(body.chat_template_kwargs!.reasoning_effort).toBe('max')
+  })
+
   test('does NOT include thinking params when disabled', () => {
     const body = buildOpenAIRequestBody({
       ...baseParams,
@@ -234,6 +277,7 @@ describe('buildOpenAIRequestBody — thinking params', () => {
     expect(body.thinking).toBeUndefined()
     expect(body.enable_thinking).toBeUndefined()
     expect(body.chat_template_kwargs).toBeUndefined()
+    expect(body.reasoning_effort).toBeUndefined()
   })
 
   test('always includes stream and stream_options', () => {

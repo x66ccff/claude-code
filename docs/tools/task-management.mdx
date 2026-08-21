@@ -39,7 +39,7 @@ async call({ todos }, context) {
 
 一个微妙的设计：当所有任务都 `completed` 时，`newTodos` 被设为空数组（而非保留 `completed` 列表）。这确保 UI 上不会有"已完成"的视觉噪音。
 
-此外，V1 包含一个**验证推动**（verification nudge）机制：当主线程 Agent 完成 3+ 个任务且没有任何一个是验证步骤时，系统在 tool_result 中追加提示，催促 Agent 派生验证子 Agent：
+此外，V1 和 V2 的源码保留一个可选的**验证推动**（verification nudge）机制：当主线程 Agent 完成 3+ 个任务且没有任何一个是验证步骤时，系统可在 tool_result 中追加提示，催促 Agent 派生验证子 Agent：
 
 ```typescript
 // 条件：主线程 + 全部完成 + ≥3 项 + 无验证任务
@@ -50,7 +50,13 @@ if (allDone && todos.length >= 3 && !todos.some(t => /verif/i.test(t.content))) 
 // "NOTE: You just closed out 3+ tasks and none was a verification step..."
 ```
 
-这是防止 Agent "自说自话地宣布完成"的防御性设计——通过结构性推动而非硬约束。
+本地构建默认关闭这个机制：`VERIFICATION_AGENT` 不在 `DEFAULT_BUILD_FEATURES` 中，`tengu_hive_evidence` 的本地默认值为 `false`。即使某个定制构建重新打开这两层，也可以在运行时设置以下 kill switch：
+
+```bash
+export CLAUDE_CODE_DISABLE_VERIFICATION_AGENT=1
+```
+
+这是防止 Agent "自说自话地宣布完成"的防御性设计，但会增加额外模型调用、耗时与 token 成本，因此只应显式启用。
 
 ## V2：文件系统持久化的任务系统
 

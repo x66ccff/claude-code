@@ -539,7 +539,7 @@ AI 也可通过 `SnipTool` 自动截断过长的对话：
 | `CONTEXT_COLLAPSE` | ✅ dev+build | 上下文折叠 |
 | `ULTRATHINK` | ✅ dev+build | 扩展思考 |
 | `EXTRACT_MEMORIES` | ✅ dev+build | 自动记忆提取 |
-| `VERIFICATION_AGENT` | ✅ dev+build | 验证 Agent |
+| `VERIFICATION_AGENT` | ❌ 默认关闭 | 验证 Agent；运行时 kill switch: `CLAUDE_CODE_DISABLE_VERIFICATION_AGENT=1` |
 | `KAIROS_BRIEF` | ✅ dev+build | Brief 模式 |
 | `AWAY_SUMMARY` | ✅ dev+build | 离开摘要 |
 | `ACP` | ✅ dev+build | ACP 协议 |

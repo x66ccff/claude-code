@@ -1,11 +1,18 @@
 import type { BetaUsage as Usage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
-import { roughTokenCountEstimationForMessages } from '../services/tokenEstimation.js'
+import {
+  roughTokenCountEstimation,
+  roughTokenCountEstimationForMessages,
+} from '../services/tokenEstimation.js'
 import type {
   AssistantMessage,
   ContentItem,
   Message,
 } from '../types/message.js'
-import { SYNTHETIC_MESSAGES, SYNTHETIC_MODEL } from './messages.js'
+import {
+  isCompactBoundaryMessage,
+  SYNTHETIC_MESSAGES,
+  SYNTHETIC_MODEL,
+} from './messages.js'
 import { jsonStringify } from './slowOperations.js'
 
 export function getTokenUsage(message: Message): Usage | undefined {
@@ -155,6 +162,9 @@ export function getCurrentUsage(messages: Message[]): {
 } | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]
+    // Manual compaction keeps pre-compact messages in REPL history for
+    // scrollback. Never cross the boundary and reuse their stale API usage.
+    if (message && isCompactBoundaryMessage(message)) return null
     const usage = message ? getTokenUsage(message) : undefined
     if (usage) {
       const inputTokens =
@@ -172,6 +182,28 @@ export function getCurrentUsage(messages: Message[]): {
         cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
       }
     }
+  }
+  return null
+}
+
+/**
+ * Return the temporary message-payload estimate attached to the latest full
+ * compact boundary. It is used only until a real post-compact API response
+ * supplies authoritative usage.
+ */
+export function getPostCompactTokenEstimate(
+  messages: readonly Message[],
+): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message && getTokenUsage(message)) return null
+    if (!message || !isCompactBoundaryMessage(message)) continue
+    const estimate = message.compactMetadata.estimatedPostCompactTokens
+    return typeof estimate === 'number' &&
+      Number.isFinite(estimate) &&
+      estimate >= 0
+      ? estimate
+      : null
   }
   return null
 }
@@ -221,6 +253,74 @@ export function getAssistantMessageContentLength(
     }
   }
   return contentLength
+}
+
+export type ThinkingTokenSummary = {
+  tokens: number
+  estimated: boolean
+}
+
+/**
+ * Count thinking tokens for a set of messages.
+ *
+ * OpenAI-compatible providers may report an exact
+ * completion_tokens_details.reasoning_tokens value, normalized by our stream
+ * adapter to usage.thinking_tokens. When that is absent, estimate only the
+ * visible thinking blocks and mark the aggregate as estimated. Responses that
+ * are split across multiple message records are deduplicated by API message ID.
+ */
+export function getThinkingTokenSummary(
+  messages: readonly Message[],
+): ThinkingTokenSummary {
+  const exactByResponse = new Map<string, number>()
+
+  for (const [index, message] of messages.entries()) {
+    if (message.type !== 'assistant') continue
+    const usage = getTokenUsage(message) as
+      | (Usage & {
+          thinking_tokens?: unknown
+          completion_tokens_details?: { reasoning_tokens?: unknown }
+        })
+      | undefined
+    const reportedTokens =
+      usage?.thinking_tokens ??
+      usage?.completion_tokens_details?.reasoning_tokens
+    if (
+      typeof reportedTokens !== 'number' ||
+      !Number.isFinite(reportedTokens) ||
+      reportedTokens < 0
+    ) {
+      continue
+    }
+    const responseKey =
+      getAssistantMessageId(message) ?? String(message.uuid ?? index)
+    exactByResponse.set(responseKey, reportedTokens)
+  }
+
+  let tokens = Array.from(exactByResponse.values()).reduce(
+    (sum, value) => sum + value,
+    0,
+  )
+  let estimated = false
+
+  for (const [index, message] of messages.entries()) {
+    if (message.type !== 'assistant') continue
+    const responseKey =
+      getAssistantMessageId(message) ?? String(message.uuid ?? index)
+    if (exactByResponse.has(responseKey)) continue
+
+    const content = message.message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content as ContentItem[]) {
+      if (block.type !== 'thinking') continue
+      const thinking = (block as ContentItem & { thinking: string }).thinking
+      if (!thinking) continue
+      tokens += roughTokenCountEstimation(thinking)
+      estimated = true
+    }
+  }
+
+  return { tokens, estimated }
 }
 
 /**

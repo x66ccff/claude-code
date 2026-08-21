@@ -1,0 +1,13 @@
+name: Public safety audit
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject credentials and private runtime files
+        run: scripts/audit-public-tree.sh .

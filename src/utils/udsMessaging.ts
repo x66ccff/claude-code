@@ -536,7 +536,6 @@ export async function startUdsMessaging(
             maxFrameBytes: MAX_UDS_FRAME_BYTES,
             onFrameError: error => {
               logForDebugging(`[udsMessaging] ${error.message}`)
-              closeWithError(error.message)
             },
             onInvalidFrame: error => {
               logForDebugging(
@@ -544,7 +543,10 @@ export async function startUdsMessaging(
               )
               closeWithError('invalid frame')
             },
-            destroyOnFrameError: false,
+            // Oversized input is a protocol/security violation. Disconnect
+            // immediately instead of waiting for an error write callback;
+            // some runtimes can otherwise leave the peer half-open.
+            destroyOnFrameError: true,
           },
         )
 
@@ -742,9 +744,11 @@ export async function sendUdsMessage(
     }
 
     conn = createConnection(targetSocketPath, () => {
-      conn.write(jsonStringify(outbound) + '\n', err => {
-        if (err) finish(err)
-      })
+      // The protocol carries one request per connection. Half-close the write
+      // side after the frame while keeping the readable side open for the
+      // response. This also makes a peer that closes without responding
+      // observable immediately across Node and Bun runtimes.
+      conn.end(jsonStringify(outbound) + '\n')
     })
     attachUdsResponseReader(conn, {
       maxFrameBytes: MAX_UDS_FRAME_BYTES,
