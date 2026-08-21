@@ -7,7 +7,8 @@ import { randomUUID } from 'crypto'
  *
  * Mapping:
  *   First chunk              → message_start
- *   delta.reasoning_content  → content_block_start(thinking) + thinking_delta + content_block_stop
+ *   delta.reasoning_content / delta.reasoning
+ *                            → content_block_start(thinking) + thinking_delta + content_block_stop
  *   delta.content            → content_block_start(text) + text_delta + content_block_stop
  *   delta.tool_calls         → content_block_start(tool_use) + input_json_delta + content_block_stop
  *   finish_reason            → message_delta(stop_reason) + message_stop
@@ -15,6 +16,7 @@ import { randomUUID } from 'crypto'
  * Usage field mapping (OpenAI → Anthropic):
  *   prompt_tokens - cached_tokens             → input_tokens (non-cached input only)
  *   completion_tokens                         → output_tokens
+ *   completion_tokens_details.reasoning_tokens → thinking_tokens
  *   prompt_tokens_details.cached_tokens       → cache_read_input_tokens
  *   (no OpenAI equivalent)                    → cache_creation_input_tokens (always 0)
  *
@@ -23,7 +25,9 @@ import { randomUUID } from 'crypto'
  *   OpenAI-compatible endpoints) are fully captured before the final counts are reported.
  *
  * Thinking support:
- *   DeepSeek and compatible providers send `delta.reasoning_content` for chain-of-thought.
+ *   DeepSeek and compatible providers send `delta.reasoning_content` or
+ *   `delta.reasoning` for chain-of-thought. vLLM's DeepSeek V4 parser currently
+ *   emits the latter.
  *   This is mapped to Anthropic's `thinking` content blocks:
  *     content_block_start: { type: 'thinking', thinking: '', signature: '' }
  *     content_block_delta: { type: 'thinking_delta', thinking: '...' }
@@ -53,13 +57,14 @@ export async function* adaptOpenAIStreamToAnthropic(
   // Track text block state
   let textBlockOpen = false
 
-  // Track usage — all four Anthropic fields, populated from OpenAI usage fields:
-  // rawInputTokens tracks the raw prompt_tokens (OpenAI total, including cached).
-  // inputTokens is the derived Anthropic value (non-cached only = rawInputTokens - cachedReadTokens).
+  // Track usage — all four Anthropic fields, populated from OpenAI usage fields.
+  // OpenAI prompt_tokens includes cached tokens, while Anthropic input_tokens
+  // excludes them, so keep the raw total and derive the non-cached count.
   let rawInputTokens = 0
   let inputTokens = 0
   let outputTokens = 0
   let cachedReadTokens = 0
+  let thinkingTokens: number | undefined
 
   // Track all open content block indices (for cleanup)
   const openBlockIndices = new Set<number>()
@@ -75,16 +80,23 @@ export async function* adaptOpenAIStreamToAnthropic(
     // Extract usage from any chunk that carries it.
     if (chunk.usage) {
       rawInputTokens = chunk.usage.prompt_tokens ?? rawInputTokens
-      const rawCached =
-        ((chunk.usage as any).prompt_tokens_details?.cached_tokens as
-          | number
-          | undefined) ?? cachedReadTokens
-      // Anthropic's input_tokens = non-cached input only. OpenAI's prompt_tokens
-      // includes cached tokens, so subtract. Clamp to 0 in case cached > total
-      // due to a streaming race.
-      inputTokens = Math.max(0, rawInputTokens - rawCached)
       outputTokens = chunk.usage.completion_tokens ?? outputTokens
-      cachedReadTokens = rawCached
+      const extendedUsage = chunk.usage as typeof chunk.usage & {
+        completion_tokens_details?: { reasoning_tokens?: unknown }
+      }
+      if (extendedUsage.prompt_tokens_details?.cached_tokens != null) {
+        cachedReadTokens = extendedUsage.prompt_tokens_details.cached_tokens
+      }
+      inputTokens = Math.max(0, rawInputTokens - cachedReadTokens)
+      const reportedThinkingTokens =
+        extendedUsage.completion_tokens_details?.reasoning_tokens
+      if (
+        typeof reportedThinkingTokens === 'number' &&
+        Number.isFinite(reportedThinkingTokens) &&
+        reportedThinkingTokens >= 0
+      ) {
+        thinkingTokens = reportedThinkingTokens
+      }
     }
 
     // Emit message_start on first chunk
@@ -114,13 +126,18 @@ export async function* adaptOpenAIStreamToAnthropic(
     // Skip chunks that carry only usage data (no delta content)
     if (!delta) continue
 
-    // Handle reasoning_content → Anthropic thinking block.
-    // Empty string is a valid signal: DeepSeek v4 thinking mode sometimes
-    // returns reasoning_content: "" when the model answers directly. The
-    // empty thinking block must round-trip back to the API in subsequent
-    // requests, otherwise DeepSeek rejects with 400.
-    const reasoningContent = (delta as any).reasoning_content
-    if (reasoningContent != null) {
+    // Handle provider reasoning fields → Anthropic thinking block. Prefer the
+    // common reasoning_content extension when both aliases are present so a
+    // provider that mirrors the same text into both fields is not duplicated.
+    const providerDelta = delta as typeof delta & {
+      reasoning_content?: unknown
+      reasoning?: unknown
+    }
+    const hasReasoningField =
+      providerDelta.reasoning_content != null || providerDelta.reasoning != null
+    const reasoningContent =
+      providerDelta.reasoning_content ?? providerDelta.reasoning
+    if (hasReasoningField && typeof reasoningContent === 'string') {
       if (!thinkingBlockOpen) {
         currentContentIndex++
         thinkingBlockOpen = true
@@ -317,6 +334,9 @@ export async function* adaptOpenAIStreamToAnthropic(
         output_tokens: outputTokens,
         cache_read_input_tokens: cachedReadTokens,
         cache_creation_input_tokens: 0,
+        ...(thinkingTokens !== undefined
+          ? { thinking_tokens: thinkingTokens }
+          : {}),
       },
     } as BetaRawMessageStreamEvent
 

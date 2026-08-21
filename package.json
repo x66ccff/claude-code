@@ -60,6 +60,7 @@
     "test:production:verbose": "bun run scripts/production-test.ts --verbose",
     "test:production:bun": "bun run scripts/production-test.ts --bun",
     "check:bundle": "bun run scripts/check-bundle-integrity.ts",
+    "audit:public": "bash scripts/audit-public-tree.sh .",
     "check:unused": "knip-bun",
     "health": "bun run scripts/health-check.ts",
     "postinstall": "node scripts/run-parallel.mjs scripts/postinstall.cjs scripts/setup-chrome-mcp.mjs",

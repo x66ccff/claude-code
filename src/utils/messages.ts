@@ -4866,6 +4866,11 @@ export function createTurnDurationMessage(
   durationMs: number,
   budget?: { tokens: number; limit: number; nudges: number },
   messageCount?: number,
+  tokenStats?: {
+    outputTokens: number
+    thinkingTokens: number
+    thinkingTokensEstimated: boolean
+  },
 ): SystemTurnDurationMessage {
   return {
     type: 'system',
@@ -4874,6 +4879,9 @@ export function createTurnDurationMessage(
     budgetTokens: budget?.tokens,
     budgetLimit: budget?.limit,
     budgetNudges: budget?.nudges,
+    outputTokens: tokenStats?.outputTokens,
+    thinkingTokens: tokenStats?.thinkingTokens,
+    thinkingTokensEstimated: tokenStats?.thinkingTokensEstimated,
     messageCount,
     timestamp: new Date().toISOString(),
     uuid: randomUUID(),

@@ -76,6 +76,7 @@ export const TodoWriteTool = buildTool({
     let verificationNudgeNeeded = false
     if (
       feature('VERIFICATION_AGENT') &&
+      !process.env.CLAUDE_CODE_DISABLE_VERIFICATION_AGENT &&
       getFeatureValue_CACHED_MAY_BE_STALE('tengu_hive_evidence', false) &&
       !context.agentId &&
       allDone &&

@@ -1,6 +1,6 @@
 # WEB_SEARCH_TOOL — 网页搜索工具
 
-> 实现状态：适配器架构完成，支持 API / Bing / Brave 三种后端
+> 实现状态：适配器架构完成，支持 API / Bing / Brave / Exa / Serper 后端
 > 引用数：核心工具，无 feature flag 门控（始终启用）
 
 ## 一、功能概述
@@ -25,9 +25,13 @@ WebSearchTool.call()
        │     └── 直接抓取 Bing 搜索页 HTML
        │         正则提取 b_algo 块中的标题/URL/摘要
        │
-       └── BraveSearchAdapter — Brave LLM Context API
-             └── 调用 Brave HTTPS GET 接口
-                 将 grounding payload 映射为标题/URL/摘要
+       ├── BraveSearchAdapter — Brave LLM Context API
+       │     └── 调用 Brave HTTPS GET 接口
+       │         将 grounding payload 映射为标题/URL/摘要
+       │
+       └── SerperSearchAdapter — Serper Google Search API
+             └── 使用 SERPER_API_KEY 调用 HTTPS JSON 接口
+                 将 answer box / knowledge graph / organic / news 映射为结果
 ```
 
 ### 2.2 模块结构
@@ -42,6 +46,7 @@ WebSearchTool.call()
 | API 适配器 | `packages/builtin-tools/src/tools/WebSearchTool/adapters/apiAdapter.ts` | 封装原有 `queryModelWithStreaming` 逻辑，使用 server tool |
 | Bing 适配器 | `packages/builtin-tools/src/tools/WebSearchTool/adapters/bingAdapter.ts` | Bing HTML 抓取 + 正则解析 |
 | Brave 适配器 | `packages/builtin-tools/src/tools/WebSearchTool/adapters/braveAdapter.ts` | Brave LLM Context API 适配与结果映射 |
+| Serper 适配器 | `packages/builtin-tools/src/tools/WebSearchTool/adapters/serperAdapter.ts` | Serper API、域名过滤及鉴权/额度/限流/网络错误分类 |
 | 单元测试 | `packages/builtin-tools/src/tools/WebSearchTool/__tests__/bingAdapter.test.ts`, `packages/builtin-tools/src/tools/WebSearchTool/__tests__/braveAdapter*.test.ts`, `packages/builtin-tools/src/tools/WebSearchTool/__tests__/adapterFactory.test.ts` | Bing / Brave 解析与工厂逻辑测试 |
 | 集成测试 | `packages/builtin-tools/src/tools/WebSearchTool/__tests__/bingAdapter.integration.ts`, `packages/builtin-tools/src/tools/WebSearchTool/__tests__/braveAdapter.integration.ts` | 真实网络请求验证 |
 
@@ -124,7 +129,7 @@ Bing 返回的重定向 URL 格式：`bing.com/ck/a?...&u=a1aHR0cHM6Ly9...`
 
 ```typescript
 export function createAdapter(): WebSearchAdapter {
-  // 1. WEB_SEARCH_ADAPTER=api|bing|brave 显式指定
+  // 1. WEB_SEARCH_ADAPTER=api|bing|brave|exa|serper 显式指定
   // 2. Anthropic 官方 API Base URL → ApiSearchAdapter
   // 3. 第三方代理 / 非官方端点 → BingSearchAdapter
 }
@@ -132,6 +137,11 @@ export function createAdapter(): WebSearchAdapter {
 
 显式指定 `WEB_SEARCH_ADAPTER=brave` 时，会改用 Brave LLM Context API 后端，并要求
 `BRAVE_SEARCH_API_KEY` 或 `BRAVE_API_KEY`。
+
+显式指定 `WEB_SEARCH_ADAPTER=serper` 时，Claude 仍看到并调用原生 `WebSearch`
+工具，但客户端会将调用转发到 Serper。凭据只从 `SERPER_API_KEY` 环境变量读取；
+可选的 `SERPER_API_URL` 可用于兼容代理。401/403、额度耗尽、429、超时、网络及
+服务端错误会转换成可操作的错误说明，不会静默降级到另一个搜索后端或消耗未知额度。
 
 ## 五、接口定义
 

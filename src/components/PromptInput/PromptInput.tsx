@@ -119,6 +119,7 @@ import { ModelPicker } from '../ModelPicker.js';
 import { QuickOpenDialog } from '../QuickOpenDialog.js';
 import TextInput from '../TextInput.js';
 import { ThinkingToggle } from '../ThinkingToggle.js';
+import { ContextUsageBar } from '../ContextUsageBar.js';
 import { BackgroundTasksDialog } from '../tasks/BackgroundTasksDialog.js';
 import { shouldHideTasksFooter } from '../tasks/taskStatusUtils.js';
 import { TeamsDialog } from '../teams/TeamsDialog.js';
@@ -219,7 +220,7 @@ type Props = {
 };
 
 // Bottom slot has maxHeight="50%"; reserve lines for footer, border, status.
-const PROMPT_FOOTER_LINES = 5;
+const PROMPT_FOOTER_LINES = 6;
 const MIN_INPUT_VIEWPORT_LINES = 3;
 
 function PromptInput({
@@ -2466,6 +2467,7 @@ function PromptInput({
         </Box>
       )}
       <PromptInputStashNotice hasStash={stashedPrompt !== undefined} />
+      <ContextUsageBar messages={messages} model={mainLoopModel} />
       {swarmBanner ? (
         <>
           <Text color={swarmBanner.bgColor}>

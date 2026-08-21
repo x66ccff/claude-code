@@ -4,6 +4,7 @@
  * triggering heavy module side-effects (OpenAI client, stream adapter, etc.).
  */
 import type { ChatCompletionCreateParamsStreaming } from 'openai/resources/chat/completions/completions.mjs'
+import type { EffortLevel } from '../../../utils/effort.js'
 import { isEnvTruthy, isEnvDefinedFalsy } from '../../../utils/envUtils.js'
 
 /**
@@ -56,6 +57,11 @@ export function resolveOpenAIMaxTokens(
   )
 }
 
+/** Suppress estimated provider billing for explicitly configured local APIs. */
+export function shouldReportOpenAIUsageCost(): boolean {
+  return !isEnvTruthy(process.env.CLAUDE_CODE_OPENAI_LOCAL_ZERO_COST)
+}
+
 /**
  * Build the request body for OpenAI chat.completions.create().
  * Extracted for testability — the thinking mode params are injected here.
@@ -73,12 +79,18 @@ export function buildOpenAIRequestBody(params: {
   tools: any[]
   toolChoice: any
   enableThinking: boolean
+  reasoningEffort?: EffortLevel
   maxTokens: number
   temperatureOverride?: number
 }): ChatCompletionCreateParamsStreaming & {
   thinking?: { type: string }
   enable_thinking?: boolean
-  chat_template_kwargs?: { thinking: boolean; enable_thinking: boolean }
+  reasoning_effort?: EffortLevel
+  chat_template_kwargs?: {
+    thinking: boolean
+    enable_thinking: boolean
+    reasoning_effort?: EffortLevel
+  }
 } {
   const {
     model,
@@ -86,6 +98,7 @@ export function buildOpenAIRequestBody(params: {
     tools,
     toolChoice,
     enableThinking,
+    reasoningEffort,
     maxTokens,
     temperatureOverride,
   } = params
@@ -102,12 +115,21 @@ export function buildOpenAIRequestBody(params: {
     // Enable chain-of-thought output for DeepSeek and MiMo models.
     // When active, temperature/top_p/presence_penalty/frequency_penalty are ignored.
     ...(enableThinking && {
+      // vLLM uses xhigh for the public top-level maximum while the model's
+      // chat template keeps its native max label.
+      ...(reasoningEffort && {
+        reasoning_effort: reasoningEffort === 'max' ? 'xhigh' : reasoningEffort,
+      }),
       // Official DeepSeek API format
       thinking: { type: 'enabled' },
       // Self-hosted DeepSeek-V3.2 format
       enable_thinking: true,
       // Both DeepSeek self-hosted and MiMo formats in chat_template_kwargs
-      chat_template_kwargs: { thinking: true, enable_thinking: true },
+      chat_template_kwargs: {
+        thinking: true,
+        enable_thinking: true,
+        ...(reasoningEffort && { reasoning_effort: reasoningEffort }),
+      },
     }),
     // Only send temperature when thinking mode is off (DeepSeek ignores it anyway,
     // but other providers may respect it)

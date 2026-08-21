@@ -63,10 +63,12 @@ import {
   incrementOverageCreditUpsellSeenCount,
   createOverageCreditFeed,
 } from './OverageCreditUpsell.js';
+import { plural } from '../../utils/stringUtils.js';
 import { useAppState } from '../../state/AppState.js';
 import { getEffortSuffix } from '../../utils/effort.js';
 import { useMainLoopModel } from '../../hooks/useMainLoopModel.js';
 import { renderModelSetting } from '../../utils/model/model.js';
+import { ApiConnectionInfo } from './ApiConnectionInfo.js';
 
 const LEFT_PANEL_MAX_WIDTH = 50;
 
@@ -246,6 +248,7 @@ export function LogoV2(): React.ReactNode {
             </Box>
             <Text dimColor>{modelDisplayName}</Text>
             <Text dimColor>{billingType}</Text>
+            <ApiConnectionInfo maxWidth={Math.max(columns - layoutWidth, 20)} centered />
             <Text dimColor>{agentName ? `@${agentName} · ${truncatedCwd}` : truncatedCwd}</Text>
           </Box>
         </OffscreenFreeze>
@@ -303,7 +306,7 @@ export function LogoV2(): React.ReactNode {
               width={leftWidth}
               justifyContent="space-between"
               alignItems="center"
-              minHeight={9}
+              minHeight={11}
             >
               <Box marginTop={1}>
                 <Text bold>{welcomeMessage}</Text>
@@ -313,6 +316,7 @@ export function LogoV2(): React.ReactNode {
 
               <Box flexDirection="column" alignItems="center">
                 <Text dimColor>{modelLine}</Text>
+                <ApiConnectionInfo maxWidth={leftWidth} centered />
                 <Text dimColor>{cwdLine}</Text>
               </Box>
             </Box>

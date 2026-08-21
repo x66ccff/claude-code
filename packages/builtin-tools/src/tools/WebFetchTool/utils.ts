@@ -16,8 +16,30 @@ import { getSettings_DEPRECATED } from 'src/utils/settings/settings.js'
 import { asSystemPrompt } from 'src/utils/systemPromptType.js'
 import { isPreapprovedHost } from './preapproved.js'
 import { makeSecondaryModelPrompt } from './prompt.js'
+import {
+  getWebFetchHttpClient,
+  normalizeWebFetchProxyError,
+  resetWebFetchProxyClient,
+  WebFetchProxyError,
+} from './webFetchProxy.js'
 
 const DEFAULT_TAVILY_EXTRACT_URL = 'https://tavily.claude-code-best.win/extract'
+
+class DomainBlockedError extends Error {
+  constructor(domain: string) {
+    super(`Claude Code is unable to fetch from ${domain}`)
+    this.name = 'DomainBlockedError'
+  }
+}
+
+class DomainCheckFailedError extends Error {
+  constructor(domain: string) {
+    super(
+      `Unable to verify if domain ${domain} is safe to fetch. This may be due to network restrictions or enterprise security policies blocking claude.ai.`,
+    )
+    this.name = 'DomainCheckFailedError'
+  }
+}
 
 // Custom error class for egress proxy blocks
 class EgressBlockedError extends Error {
@@ -54,21 +76,24 @@ const URL_CACHE = new LRUCache<string, CacheEntry>({
   ttl: CACHE_TTL_MS,
 })
 
+const DOMAIN_CHECK_CACHE = new LRUCache<string, true>({
+  max: 128,
+  ttl: 5 * 60 * 1000,
+})
+
 export function clearWebFetchCache(): void {
   URL_CACHE.clear()
+  DOMAIN_CHECK_CACHE.clear()
+  resetWebFetchProxyClient()
 }
 
 function responseHeaderToString(value: unknown): string | undefined {
-  if (typeof value === 'string') {
-    return value
-  }
-  if (Array.isArray(value)) {
-    const parts = value
-      .map(responseHeaderToString)
-      .filter((part): part is string => part !== undefined)
-    return parts.length > 0 ? parts.join(', ') : undefined
-  }
-  return undefined
+  if (typeof value === 'string') return value
+  if (!Array.isArray(value)) return undefined
+  const parts = value
+    .map(responseHeaderToString)
+    .filter((part): part is string => part !== undefined)
+  return parts.length > 0 ? parts.join(', ') : undefined
 }
 
 function getResponseHeader(
@@ -78,11 +103,8 @@ function getResponseHeader(
   const headersWithGet = headers as { get?: (headerName: string) => unknown }
   if (typeof headersWithGet.get === 'function') {
     const value = responseHeaderToString(headersWithGet.get(name))
-    if (value !== undefined) {
-      return value
-    }
+    if (value !== undefined) return value
   }
-
   return responseHeaderToString(headers[name.toLowerCase()])
 }
 
@@ -117,7 +139,6 @@ const MAX_HTTP_CONTENT_LENGTH = 10 * 1024 * 1024
 
 // Timeout for the main HTTP fetch request (60 seconds).
 // Prevents hanging indefinitely on slow/unresponsive servers.
-// Overridable via settings.webFetchHttpTimeoutMs (set in /web-tools panel).
 const DEFAULT_FETCH_TIMEOUT_MS = 60_000
 
 function getFetchTimeoutMs(): number {
@@ -126,10 +147,10 @@ function getFetchTimeoutMs(): number {
   }
   return settings.webFetchHttpTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS
 }
+const DOMAIN_CHECK_TIMEOUT_MS = 10_000
 
 // Cap same-host redirect hops. Without this a malicious server can return
 // a redirect loop (/a → /b → /a …) and the per-request timeout
-// (controlled by settings.webFetchHttpTimeoutMs)
 // resets on every hop, hanging the tool until user interrupt. 10 matches
 // common client defaults (axios=5, follow-redirects=21, Chrome=20).
 const MAX_REDIRECTS = 10
@@ -178,6 +199,46 @@ export function validateURL(url: string): boolean {
   return true
 }
 
+type DomainCheckResult =
+  | { status: 'allowed' }
+  | { status: 'blocked' }
+  | { status: 'check_failed'; error: Error }
+
+export async function checkDomainBlocklist(
+  domain: string,
+): Promise<DomainCheckResult> {
+  if (DOMAIN_CHECK_CACHE.has(domain)) {
+    return { status: 'allowed' }
+  }
+  try {
+    const response = await getWebFetchHttpClient().get(
+      `https://api.anthropic.com/api/web/domain_info?domain=${encodeURIComponent(domain)}`,
+      { timeout: DOMAIN_CHECK_TIMEOUT_MS },
+    )
+    if (response.status === 200) {
+      if (response.data.can_fetch === true) {
+        DOMAIN_CHECK_CACHE.set(domain, true)
+        return { status: 'allowed' }
+      }
+      return { status: 'blocked' }
+    }
+    // Non-200 status but didn't throw
+    return {
+      status: 'check_failed',
+      error: new Error(`Domain check returned status ${response.status}`),
+    }
+  } catch (e) {
+    const normalizedError = normalizeWebFetchProxyError(e)
+    logError(normalizedError)
+    return {
+      status: 'check_failed',
+      error:
+        normalizedError instanceof Error
+          ? normalizedError
+          : new Error(String(normalizedError)),
+    }
+  }
+}
 /**
  * Check if a redirect is safe to follow
  * Allows redirects that:
@@ -245,7 +306,7 @@ export async function getWithPermittedRedirects(
     throw new Error(`Too many redirects (exceeded ${MAX_REDIRECTS})`)
   }
   try {
-    return await axios.get(url, {
+    return await getWebFetchHttpClient().get(url, {
       signal,
       timeout: getFetchTimeoutMs(),
       maxRedirects: 0,
@@ -304,7 +365,7 @@ export async function getWithPermittedRedirects(
       throw new EgressBlockedError(hostname)
     }
 
-    throw error
+    throw normalizeWebFetchProxyError(error)
   }
 }
 
@@ -360,6 +421,25 @@ export async function getURLMarkdownContent(
 
     const hostname = parsedUrl.hostname
 
+    // Check if the user has opted to skip the blocklist check
+    // This is for enterprise customers with restrictive security policies
+    // that prevent outbound connections to claude.ai
+    const settings = getSettings_DEPRECATED()
+    if (settings.skipWebFetchPreflight === false) {
+      const checkResult = await checkDomainBlocklist(hostname)
+      switch (checkResult.status) {
+        case 'allowed':
+          // Continue with the fetch
+          break
+        case 'blocked':
+          throw new DomainBlockedError(hostname)
+        case 'check_failed':
+          if (checkResult.error instanceof WebFetchProxyError) {
+            throw checkResult.error
+          }
+          throw new DomainCheckFailedError(hostname)
+      }
+    }
     if (process.env.USER_TYPE === 'ant') {
       logEvent('tengu_web_fetch_host', {
         hostname:
@@ -367,6 +447,14 @@ export async function getURLMarkdownContent(
       })
     }
   } catch (e) {
+    if (
+      e instanceof DomainBlockedError ||
+      e instanceof DomainCheckFailedError ||
+      e instanceof WebFetchProxyError
+    ) {
+      // Expected user-facing failures - re-throw without logging as internal error
+      throw e
+    }
     logError(e)
   }
 
@@ -490,17 +578,25 @@ export async function fetchContentWithTavily(
       ? baseUrl
       : `${baseUrl.replace(/\/$/, '')}/extract`
 
-  const response = await axios.post<{ url: string; raw_content: string }>(
-    extractUrl,
-    {
-      urls: [url],
-    },
-    {
-      signal: abortSignal,
-      timeout: getFetchTimeoutMs(),
-      headers: { 'Content-Type': 'application/json' },
-    },
-  )
+  let response: AxiosResponse<{ url: string; raw_content: string }>
+  try {
+    response = await getWebFetchHttpClient().post<{
+      url: string
+      raw_content: string
+    }>(
+      extractUrl,
+      {
+        urls: [url],
+      },
+      {
+        signal: abortSignal,
+        timeout: getFetchTimeoutMs(),
+        headers: { 'Content-Type': 'application/json' },
+      },
+    )
+  } catch (error) {
+    throw normalizeWebFetchProxyError(error)
+  }
 
   if (abortSignal.aborted) {
     throw new AbortError()

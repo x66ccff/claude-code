@@ -8,9 +8,11 @@ import {
 import { useAppState, useSetAppState } from '../../state/AppState.js';
 import type { LocalJSXCommandOnDone } from '../../types/command.js';
 import {
+  type EffortLevel,
   type EffortValue,
   getDisplayedEffortLevel,
   getEffortEnvOverride,
+  getModelPickerEffortLevels,
   getEffortValueDescription,
   isEffortLevel,
   toPersistableEffort,
@@ -66,6 +68,11 @@ function setEffortValue(effortValue: EffortValue): EffortCommandResult {
   };
 }
 
+function getConfiguredEffortLevels(): EffortLevel[] | undefined {
+  if (!process.env.CLAUDE_CODE_MODEL_PICKER_EFFORT_LEVELS) return undefined;
+  return getModelPickerEffortLevels(true);
+}
+
 export function showCurrentEffort(appStateEffort: EffortValue | undefined, model: string): EffortCommandResult {
   const envOverride = getEffortEnvOverride();
   const effectiveValue = envOverride === null ? undefined : (envOverride ?? appStateEffort);
@@ -113,9 +120,11 @@ export function executeEffort(args: string): EffortCommandResult {
     return unsetEffortLevel();
   }
 
-  if (!isEffortLevel(normalized)) {
+  const configuredLevels = getConfiguredEffortLevels();
+  if (!isEffortLevel(normalized) || (configuredLevels !== undefined && !configuredLevels.includes(normalized))) {
+    const validLevels = configuredLevels ?? ['low', 'medium', 'high', 'max'];
     return {
-      message: `Invalid argument: ${args}. Valid options are: low, medium, high, max, auto`,
+      message: `Invalid argument: ${args}. Valid options are: ${validLevels.join(', ')}, auto`,
     };
   }
 
@@ -155,8 +164,10 @@ export async function call(onDone: LocalJSXCommandOnDone, _context: unknown, arg
   args = args?.trim() || '';
 
   if (COMMON_HELP_ARGS.includes(args)) {
+    const levels = getConfiguredEffortLevels() ?? ['low', 'medium', 'high', 'max'];
+    const descriptions = levels.map(level => `- ${level}: ${getEffortValueDescription(level)}`).join('\n');
     onDone(
-      'Usage: /effort [low|medium|high|xhigh|max|auto]\n\nEffort levels:\n- low: Quick, straightforward implementation\n- medium: Balanced approach with standard testing\n- high: Comprehensive implementation with extensive testing\n- xhigh: Extended reasoning beyond high, short of max; including ChatGPT Codex models\n- max: Maximum capability with deepest reasoning; maps to xhigh for ChatGPT Codex models\n- auto: Use the default effort level for your model',
+      `Usage: /effort [${levels.join('|')}|auto]\n\nEffort levels:\n${descriptions}\n- auto: Use the default effort level for your model`,
     );
     return;
   }

@@ -71,6 +71,7 @@ import {
 } from '../../utils/context.js'
 import { resolveAppliedEffort } from '../../utils/effort.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
+import { abortableAsyncIterable } from '../../utils/abortableAsyncIterator.js'
 import { errorMessage } from '../../utils/errors.js'
 import { computeFingerprintFromMessages } from '../../utils/fingerprint.js'
 import { captureAPIRequest, logError } from '../../utils/log.js'
@@ -257,6 +258,10 @@ import {
   checkResponseForCacheBreak,
   recordPromptState,
 } from './promptCacheBreakDetection.js'
+import {
+  getStreamIdleTimeoutMs,
+  isStreamWatchdogEnabled,
+} from './streamWatchdogConfig.js'
 import {
   CannotRetryError,
   FallbackTriggeredError,
@@ -1603,6 +1608,9 @@ async function* queryModel(
   let clientRequestId: string | undefined
   // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins -- Response is available in Node 18+ and is used by the SDK
   let streamResponse: Response | undefined
+  let streamReleasePromise: Promise<void> | undefined
+
+  const STREAM_RELEASE_GRACE_MS = 1_000
 
   // Release all stream resources to prevent native memory leaks.
   // The Response object holds native TLS/socket buffers that live outside the
@@ -1612,8 +1620,40 @@ async function* queryModel(
     cleanupStream(stream)
     stream = undefined
     if (streamResponse) {
-      streamResponse.body?.cancel().catch(() => {})
+      const response = streamResponse
       streamResponse = undefined
+      try {
+        streamReleasePromise =
+          response.body?.cancel().catch(() => {}) ?? Promise.resolve()
+      } catch {
+        streamReleasePromise = Promise.resolve()
+      }
+    }
+  }
+
+  async function awaitStreamRelease(): Promise<void> {
+    releaseStreamResources()
+    const releasePromise = streamReleasePromise ?? Promise.resolve()
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    let releaseCompleted = false
+    try {
+      await Promise.race([
+        releasePromise.then(() => {
+          releaseCompleted = true
+        }),
+        new Promise<void>(resolve => {
+          timeout = setTimeout(resolve, STREAM_RELEASE_GRACE_MS)
+        }),
+      ])
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout)
+    }
+    if (!releaseCompleted) {
+      logForDebugging(
+        `Stream resource release did not settle within ${STREAM_RELEASE_GRACE_MS}ms`,
+        { level: 'warn' },
+      )
+      logForDiagnosticsNoPII('warn', 'cli_stream_release_timeout')
     }
   }
 
@@ -1934,6 +1974,7 @@ async function* queryModel(
         queryCheckpoint('query_response_headers_received')
         streamRequestId = result.request_id
         streamResponse = result.response
+        streamReleasePromise = undefined
         return result.data
       },
       {
@@ -1973,11 +2014,8 @@ async function* queryModel(
     // kill hung streams. Without this, a silently dropped connection can hang
     // the session indefinitely since the SDK's request timeout only covers the
     // initial fetch(), not the streaming body.
-    const streamWatchdogEnabled = isEnvTruthy(
-      process.env.CLAUDE_ENABLE_STREAM_WATCHDOG,
-    )
-    const STREAM_IDLE_TIMEOUT_MS =
-      parseInt(process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS || '', 10) || 90_000
+    const streamWatchdogEnabled = isStreamWatchdogEnabled()
+    const STREAM_IDLE_TIMEOUT_MS = getStreamIdleTimeoutMs()
     const STREAM_IDLE_WARNING_MS = STREAM_IDLE_TIMEOUT_MS / 2
     let streamIdleAborted = false
     // performance.now() snapshot when watchdog fires, for measuring abort propagation delay
@@ -2039,7 +2077,18 @@ async function* queryModel(
       let totalStallTime = 0
       let stallCount = 0
 
-      for await (const part of stream) {
+      for await (const part of abortableAsyncIterable(
+        stream,
+        [signal, stream.controller.signal],
+        () =>
+          signal.aborted
+            ? new APIUserAbortError()
+            : new Error(
+                streamIdleAborted
+                  ? 'Stream idle timeout - no chunks received'
+                  : 'Stream transport aborted while waiting for data',
+              ),
+      )) {
         resetStreamIdleTimer()
         const now = Date.now()
 
@@ -2946,7 +2995,7 @@ async function* queryModel(
     // encounters an abort), code after the try/finally never executes.
     // Without this, the Response object's native TLS/socket buffers leak
     // until the generator itself is GC'd (see GH #32920).
-    releaseStreamResources()
+    await awaitStreamRelease()
 
     // Non-streaming fallback cost: the streaming path tracks cost in the
     // message_delta handler before any yield. Fallback pushes to newMessages

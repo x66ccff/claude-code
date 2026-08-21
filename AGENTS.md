@@ -195,7 +195,17 @@ bun run docs:dev
 ### Context & System Prompt
 
 - **`src/context.ts`** — Builds system/user context for the API call (git status, date, CLAUDE.md contents, memory files).
-- **`src/utils/claudemd.ts`** — Discovers and loads CLAUDE.md files from project hierarchy.
+- **`src/utils/claudemd.ts`** — Discovers and loads CLAUDE.md, AGENTS.md, and rules from the project hierarchy. Preserve eager root-to-CWD loading, lazy CWD-to-target loading, deduplication, and the documented per-directory order.
+
+### Local model extension rules
+
+- Keep model names, paths, Docker images, cluster topology, native reasoning
+  labels, and tool-call templates out of generic UI/context/provider code.
+- Add service-specific behavior through a `claude-local` profile. Use generic,
+  capability-gated environment controls for context, output, effort, thinking,
+  request serialization, and local zero-cost accounting.
+- Read `docs/local-openai-model-adapters.md` before adding or replacing a local
+  OpenAI-compatible model adapter.
 
 ### Feature Flag System
 
@@ -207,7 +217,9 @@ Feature flags control which functionality is enabled at runtime. 代码中统一
 - 基础: `BUDDY`, `TRANSCRIPT_CLASSIFIER`, `BRIDGE_MODE`, `AGENT_TRIGGERS_REMOTE`, `CHICAGO_MCP`, `VOICE_MODE`
 - 统计/缓存: `SHOT_STATS`, `PROMPT_CACHE_BREAK_DETECTION`, `TOKEN_BUDGET`
 - P0 本地: `AGENT_TRIGGERS`, `ULTRATHINK`, `BUILTIN_EXPLORE_PLAN_AGENTS`, `LODESTONE`
-- P1 API 依赖: `EXTRACT_MEMORIES`, `VERIFICATION_AGENT`, `KAIROS_BRIEF`, `AWAY_SUMMARY`, `ULTRAPLAN`
+- P1 API 依赖: `EXTRACT_MEMORIES`, `KAIROS_BRIEF`, `AWAY_SUMMARY`, `ULTRAPLAN`
+
+`VERIFICATION_AGENT` is intentionally disabled in local builds because it adds an expensive verifier pass after task completion. Keep it out of `DEFAULT_BUILD_FEATURES`; `CLAUDE_CODE_DISABLE_VERIFICATION_AGENT=1` is the runtime kill switch.
 - P2: `DAEMON`
 
 **Dev mode 默认**: 全部启用（见 `scripts/dev.ts`）。

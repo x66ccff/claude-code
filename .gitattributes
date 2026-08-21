@@ -1,0 +1,17 @@
+# Runtime agent state and machine-local capabilities must never enter a public
+# source archive. The public export script uses git archive, so these rules are
+# enforced independently of .gitignore and of whether a file was once tracked.
+.claude/ export-ignore
+.claude/** export-ignore
+.codex/ export-ignore
+.codex/** export-ignore
+.agents/ export-ignore
+.agents/** export-ignore
+credentials.json export-ignore
+.public-export-local-patterns export-ignore
+
+# The public mirror is source-only. Publishing/release automation is owned by
+# the upstream/private repository and may depend on repository secrets.
+.github/workflows/publish-npm.yml export-ignore
+.github/workflows/release-rcs.yml export-ignore
+.github/workflows/update-contributors.yml export-ignore

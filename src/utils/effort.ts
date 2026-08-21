@@ -128,10 +128,58 @@ export function toPersistableEffort(
   ) {
     return value
   }
-  if (value === 'max' && process.env.USER_TYPE === 'ant') {
+  if (
+    value === 'max' &&
+    (process.env.USER_TYPE === 'ant' ||
+      isEnvTruthy(process.env.CLAUDE_CODE_ALLOW_PERSIST_MAX_EFFORT))
+  ) {
     return value
   }
   return undefined
+}
+
+/**
+ * Levels shown by the model picker's left/right effort control. Providers can
+ * opt into an exact subset for models such as DeepSeek V4, whose native levels
+ * are low/high/max rather than Claude's low/medium/high/max sequence.
+ */
+export function getModelPickerEffortLevels(includeMax: boolean): EffortLevel[] {
+  const fallback: EffortLevel[] = includeMax
+    ? ['low', 'medium', 'high', 'max']
+    : ['low', 'medium', 'high']
+  const configured = process.env.CLAUDE_CODE_MODEL_PICKER_EFFORT_LEVELS
+  if (!configured) return fallback
+
+  const parsed = [
+    ...new Set(
+      configured
+        .toLowerCase()
+        .split(',')
+        .map(level => level.trim())
+        .filter((level): level is EffortLevel => isEffortLevel(level)),
+    ),
+  ].filter(level => includeMax || level !== 'max')
+
+  return parsed.length > 0 ? parsed : fallback
+}
+
+export function cycleModelPickerEffortLevel(
+  current: EffortLevel,
+  direction: 'left' | 'right',
+  levels: EffortLevel[],
+): EffortLevel {
+  const safeLevels: EffortLevel[] =
+    levels.length > 0 ? levels : ['low', 'medium', 'high']
+  const currentIndex = safeLevels.indexOf(current)
+  const fallbackIndex = safeLevels.indexOf('high')
+  const index =
+    currentIndex !== -1
+      ? currentIndex
+      : fallbackIndex !== -1
+        ? fallbackIndex
+        : 0
+  const delta = direction === 'right' ? 1 : -1
+  return safeLevels[(index + delta + safeLevels.length) % safeLevels.length]!
 }
 
 export function getInitialEffortSetting(): EffortLevel | undefined {
@@ -317,6 +365,13 @@ export function getOpusDefaultEffortConfig(): OpusDefaultEffortConfig {
 export function getDefaultEffortForModel(
   model: string,
 ): EffortValue | undefined {
+  const configuredDefault = parseEffortValue(
+    process.env.CLAUDE_CODE_DEFAULT_EFFORT_LEVEL,
+  )
+  if (configuredDefault !== undefined) {
+    return configuredDefault
+  }
+
   if (process.env.USER_TYPE === 'ant') {
     const config = getAntModelOverrideConfig()
     const isDefaultModel =

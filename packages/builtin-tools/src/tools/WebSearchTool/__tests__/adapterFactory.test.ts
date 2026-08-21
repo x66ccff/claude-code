@@ -1,16 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-let mockSettingsWebSearchAdapter: string | undefined
-
-// Mock settings to avoid depending on the on-disk settings.json file.
-// Other tests running in the same process may have persisted adapter choices.
-let { getSettings_DEPRECATED } = await import('src/utils/settings/settings.js')
-const realGetSettings = getSettings_DEPRECATED
-
-// We can't mock getSettings_DEPRECATED directly without mocking the whole module,
-// so we test using WEB_SEARCH_ADAPTER env var which takes priority anyway.
-// This test focuses on the env-driven selection which is the primary path.
-
 let { createAdapter } = await import('../adapters/index')
 
 const originalWebSearchAdapter = process.env.WEB_SEARCH_ADAPTER
@@ -39,6 +28,9 @@ describe('createAdapter', () => {
 
     process.env.WEB_SEARCH_ADAPTER = 'tavily'
     expect(createAdapter().constructor.name).toBe('TavilySearchAdapter')
+
+    process.env.WEB_SEARCH_ADAPTER = 'serper'
+    expect(createAdapter().constructor.name).toBe('SerperSearchAdapter')
   })
 
   test('reuses the same instance when the selected backend does not change', () => {
@@ -60,7 +52,7 @@ describe('createAdapter', () => {
     expect(bingAdapter).not.toBe(braveAdapter)
   })
 
-  test('defaults to Tavily when no env var is set', () => {
+  test('uses a configured setting or the Serper machine default', () => {
     delete process.env.WEB_SEARCH_ADAPTER
 
     const adapter = createAdapter()
@@ -71,6 +63,7 @@ describe('createAdapter', () => {
       'BingSearchAdapter',
       'BraveSearchAdapter',
       'ExaSearchAdapter',
+      'SerperSearchAdapter',
       'TavilySearchAdapter',
     ]
     expect(validTypes).toContain(adapter.constructor.name)

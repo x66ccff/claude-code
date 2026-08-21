@@ -26,7 +26,11 @@ const {
   isValidNumericEffort,
   convertEffortValueToLevel,
   getEffortLevelDescription,
+  getDefaultEffortForModel,
+  getModelPickerEffortLevels,
+  cycleModelPickerEffortLevel,
   resolvePickerEffortPersistence,
+  toPersistableEffort,
   EFFORT_LEVELS,
 } = await import('src/utils/effort.js')
 
@@ -35,6 +39,62 @@ const {
 describe('EFFORT_LEVELS', () => {
   test('contains the five canonical levels', () => {
     expect(EFFORT_LEVELS).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+})
+
+describe('provider-configured model picker effort levels', () => {
+  const originalLevels = process.env.CLAUDE_CODE_MODEL_PICKER_EFFORT_LEVELS
+
+  afterEach(() => {
+    if (originalLevels === undefined) {
+      delete process.env.CLAUDE_CODE_MODEL_PICKER_EFFORT_LEVELS
+    } else {
+      process.env.CLAUDE_CODE_MODEL_PICKER_EFFORT_LEVELS = originalLevels
+    }
+  })
+
+  test('uses DeepSeek V4 low/high/max levels exactly', () => {
+    process.env.CLAUDE_CODE_MODEL_PICKER_EFFORT_LEVELS = 'low,high,max'
+    const levels = getModelPickerEffortLevels(true)
+    expect(levels).toEqual(['low', 'high', 'max'])
+    expect(cycleModelPickerEffortLevel('high', 'left', levels)).toBe('low')
+    expect(cycleModelPickerEffortLevel('high', 'right', levels)).toBe('max')
+  })
+
+  test('removes max when the focused model does not support it', () => {
+    process.env.CLAUDE_CODE_MODEL_PICKER_EFFORT_LEVELS = 'low,high,max'
+    expect(getModelPickerEffortLevels(false)).toEqual(['low', 'high'])
+  })
+})
+
+describe('local effort defaults and persistence', () => {
+  const originalDefault = process.env.CLAUDE_CODE_DEFAULT_EFFORT_LEVEL
+  const originalPersistMax = process.env.CLAUDE_CODE_ALLOW_PERSIST_MAX_EFFORT
+
+  afterEach(() => {
+    if (originalDefault === undefined) {
+      delete process.env.CLAUDE_CODE_DEFAULT_EFFORT_LEVEL
+    } else {
+      process.env.CLAUDE_CODE_DEFAULT_EFFORT_LEVEL = originalDefault
+    }
+    if (originalPersistMax === undefined) {
+      delete process.env.CLAUDE_CODE_ALLOW_PERSIST_MAX_EFFORT
+    } else {
+      process.env.CLAUDE_CODE_ALLOW_PERSIST_MAX_EFFORT = originalPersistMax
+    }
+  })
+
+  test('uses an explicit provider default without locking later UI changes', () => {
+    process.env.CLAUDE_CODE_DEFAULT_EFFORT_LEVEL = 'high'
+    expect(getDefaultEffortForModel('/models')).toBe('high')
+  })
+
+  test('allows max persistence only under the explicit local opt-in', () => {
+    delete process.env.USER_TYPE
+    delete process.env.CLAUDE_CODE_ALLOW_PERSIST_MAX_EFFORT
+    expect(toPersistableEffort('max')).toBeUndefined()
+    process.env.CLAUDE_CODE_ALLOW_PERSIST_MAX_EFFORT = '1'
+    expect(toPersistableEffort('max')).toBe('max')
   })
 })
 

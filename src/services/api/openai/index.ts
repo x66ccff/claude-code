@@ -42,7 +42,13 @@ import {
   isOpenAIThinkingEnabled,
   resolveOpenAIMaxTokens,
   buildOpenAIRequestBody,
+  shouldReportOpenAIUsageCost,
 } from './requestBody.js'
+import { acquireOpenAIRequestSlot } from './requestGate.js'
+import {
+  convertEffortValueToLevel,
+  resolveAppliedEffort,
+} from '../../../utils/effort.js'
 import { recordLLMObservation } from '../../../services/langfuse/tracing.js'
 import {
   convertMessagesToLangfuse,
@@ -53,6 +59,7 @@ export {
   isOpenAIThinkingEnabled,
   resolveOpenAIMaxTokens,
   buildOpenAIRequestBody,
+  shouldReportOpenAIUsageCost,
 }
 import { getModelMaxOutputTokens } from '../../../utils/context.js'
 import type { Options } from '../claude.js'
@@ -135,6 +142,14 @@ function isOpenAIConvertibleMessage(
   return msg.type === 'assistant' || msg.type === 'user'
 }
 
+type OpenAICompatibleUsage = {
+  input_tokens: number
+  output_tokens: number
+  cache_creation_input_tokens: number
+  cache_read_input_tokens: number
+  thinking_tokens?: number
+}
+
 /**
  * Assemble the final AssistantMessage (and optional max_tokens error) from
  * accumulated stream state. Extracted to avoid duplication between the
@@ -145,12 +160,7 @@ function assembleFinalAssistantOutputs(params: {
   contentBlocks: Record<number, Record<string, unknown>>
   tools: Tools
   agentId: string | undefined
-  usage: {
-    input_tokens: number
-    output_tokens: number
-    cache_creation_input_tokens: number
-    cache_read_input_tokens: number
-  }
+  usage: OpenAICompatibleUsage
   stopReason: string | null
   maxTokens: number
 }): (AssistantMessage | SystemAPIErrorMessage)[] {
@@ -221,6 +231,7 @@ export async function* queryModelOpenAI(
   StreamEvent | AssistantMessage | SystemAPIErrorMessage,
   void
 > {
+  const releaseRequestSlot = await acquireOpenAIRequestSlot()
   try {
     // 1. Resolve model name
     const openaiModel = resolveOpenAIModel(options.model)
@@ -304,9 +315,17 @@ export async function* queryModelOpenAI(
     )
     const openaiTools = anthropicToolsToOpenAI(standardTools)
     const openaiToolChoice = anthropicToolChoiceToOpenAI(options.toolChoice)
-    const reasoningEffort = getChatGPTResponsesReasoningEffort(
+    const chatGPTReasoningEffort = getChatGPTResponsesReasoningEffort(
       options.effortValue,
     )
+    const appliedEffort = resolveAppliedEffort(
+      options.model,
+      options.effortValue,
+    )
+    const compatibleReasoningEffort =
+      appliedEffort === undefined
+        ? undefined
+        : convertEffortValueToLevel(appliedEffort)
 
     // 9. Log tool filtering details
     if (useSearchExtraTools) {
@@ -346,7 +365,7 @@ export async function* queryModelOpenAI(
     )
 
     logForDebugging(
-      `[OpenAI] Calling model=${openaiModel}, messages=${openaiMessages.length}, tools=${openaiTools.length}, thinking=${enableThinking}`,
+      `[OpenAI] Calling model=${openaiModel}, messages=${openaiMessages.length}, tools=${openaiTools.length}, thinking=${enableThinking}, effort=${compatibleReasoningEffort ?? 'default'}`,
     )
 
     // 11. Call OpenAI API with streaming. ChatGPT subscription auth uses the
@@ -360,7 +379,7 @@ export async function* queryModelOpenAI(
               messages: openaiMessages,
               tools: openaiTools,
               toolChoice: openaiToolChoice,
-              reasoningEffort,
+              reasoningEffort: chatGPTReasoningEffort,
             }),
             signal,
             fetchOverride: options.fetchOverride as unknown as typeof fetch,
@@ -379,6 +398,7 @@ export async function* queryModelOpenAI(
               tools: openaiTools,
               toolChoice: openaiToolChoice,
               enableThinking,
+              reasoningEffort: compatibleReasoningEffort,
               maxTokens,
               temperatureOverride: options.temperatureOverride,
             }),
@@ -395,7 +415,7 @@ export async function* queryModelOpenAI(
     const collectedMessages: AssistantMessage[] = []
     let partialMessage: BetaMessage | null = null
     let stopReason: string | null = null
-    let usage = {
+    let usage: OpenAICompatibleUsage = {
       input_tokens: 0,
       output_tokens: 0,
       cache_creation_input_tokens: 0,
@@ -491,10 +511,9 @@ export async function* queryModelOpenAI(
           }
           // Track cost and token usage
           if (usage.input_tokens + usage.output_tokens > 0) {
-            const costUSD = calculateUSDCost(
-              openaiModel,
-              usage as unknown as BetaUsage,
-            )
+            const costUSD = shouldReportOpenAIUsageCost()
+              ? calculateUSDCost(openaiModel, usage as unknown as BetaUsage)
+              : 0
             addToTotalSessionCost(
               costUSD,
               usage as unknown as BetaUsage,
@@ -556,5 +575,7 @@ export async function* queryModelOpenAI(
         ? error
         : new Error(String(error))) as unknown as SDKAssistantMessageError,
     })
+  } finally {
+    releaseRequestSlot()
   }
 }

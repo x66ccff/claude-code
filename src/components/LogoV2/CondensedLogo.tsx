@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { type ReactNode, useEffect } from 'react';
 import { useMainLoopModel } from '../../hooks/useMainLoopModel.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
@@ -11,6 +12,7 @@ import { renderModelSetting } from '../../utils/model/model.js';
 import { OffscreenFreeze } from '../OffscreenFreeze.js';
 import { AnimatedClawd } from './AnimatedClawd.js';
 import { Clawd } from './Clawd.js';
+import { ApiConnectionInfo } from './ApiConnectionInfo.js';
 import { GuestPassesUpsell, incrementGuestPassesSeenCount, useShowGuestPassesUpsell } from './GuestPassesUpsell.js';
 import {
   incrementOverageCreditUpsellSeenCount,
@@ -90,6 +92,7 @@ export function CondensedLogo(): ReactNode {
               {truncatedModel} · {truncatedBilling}
             </Text>
           )}
+          <ApiConnectionInfo maxWidth={textWidth} />
           <Text dimColor>{agentName ? `@${agentName} · ${truncatedCwd}` : truncatedCwd}</Text>
           {showGuestPassesUpsell && <GuestPassesUpsell />}
           {!showGuestPassesUpsell && showOverageCreditUpsell && <OverageCreditUpsell maxWidth={textWidth} twoLine />}

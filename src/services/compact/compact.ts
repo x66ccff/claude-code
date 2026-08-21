@@ -30,7 +30,6 @@ import type {
   StreamEvent,
   SystemAPIErrorMessage,
   SystemCompactBoundaryMessage,
-  SystemMessage,
   UserMessage,
 } from '../../types/message.js'
 import {
@@ -122,6 +121,11 @@ import {
   getCompactUserSummaryMessage,
   getPartialCompactPrompt,
 } from './prompt.js'
+import {
+  CompactForkTimeoutError,
+  getCompactForkTimeoutMs,
+  runCompactForkWithTimeout,
+} from './timeout.js'
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5
 export const POST_COMPACT_TOKEN_BUDGET = 50_000
@@ -303,7 +307,7 @@ export const ERROR_MESSAGE_INCOMPLETE_RESPONSE =
   'Compaction interrupted · This may be due to network issues — please try again.'
 
 export interface CompactionResult {
-  boundaryMarker: SystemMessage
+  boundaryMarker: SystemCompactBoundaryMessage
   summaryMessages: UserMessage[]
   attachments: AttachmentMessage[]
   hookResults: HookResultMessage[]
@@ -334,30 +338,43 @@ export type RecompactionInfo = {
  * Order: boundaryMarker, summaryMessages, messagesToKeep, attachments, hookResults
  */
 export function buildPostCompactMessages(result: CompactionResult): Message[] {
-  return ([result.boundaryMarker] as Message[]).concat(
-    result.summaryMessages,
-    stripToolUseResults(result.messagesToKeep),
-    result.attachments,
-    result.hookResults,
-  )
+  const estimatedPostCompactTokens = result.truePostCompactTokenCount
+  const boundaryMarker =
+    typeof estimatedPostCompactTokens === 'number' &&
+    Number.isFinite(estimatedPostCompactTokens) &&
+    estimatedPostCompactTokens >= 0
+      ? {
+          ...result.boundaryMarker,
+          compactMetadata: {
+            ...result.boundaryMarker.compactMetadata,
+            estimatedPostCompactTokens,
+          },
+        }
+      : result.boundaryMarker
+  return [
+    boundaryMarker,
+    ...result.summaryMessages,
+    ...stripToolUseResults(result.messagesToKeep),
+    ...result.attachments,
+    ...result.hookResults,
+  ]
 }
 
-/** Release large tool result payloads from kept messages after compaction.
- *  toolUseResult is only used for UI rendering, not API calls. */
+/** Release large UI-only tool result payloads from kept messages. */
 function stripToolUseResults(messages: Message[] | undefined): Message[] {
   if (!messages) return []
-  return messages.map(msg => {
+  return messages.map(message => {
     if (
-      msg.type === 'user' &&
-      'toolUseResult' in msg &&
-      msg.toolUseResult !== undefined
+      message.type === 'user' &&
+      'toolUseResult' in message &&
+      message.toolUseResult !== undefined
     ) {
-      const { toolUseResult, ...rest } = msg as Message & {
+      const { toolUseResult: _toolUseResult, ...rest } = message as Message & {
         toolUseResult: unknown
       }
       return rest as Message
     }
-    return msg
+    return message
   })
 }
 
@@ -1219,19 +1236,23 @@ async function streamCompactSummary({
         // creating a thinking config mismatch that invalidates the cache.
         // The streaming fallback path (below) can safely set maxOutputTokensOverride
         // since it doesn't share cache with the main thread.
-        const result = await runForkedAgent({
-          promptMessages: [summaryRequest],
-          cacheSafeParams,
-          canUseTool: createCompactCanUseTool(),
-          querySource: 'compact',
-          forkLabel: 'compact',
-          maxTurns: 1,
-          skipCacheWrite: true,
-          // Pass the compact context's abortController so user Esc aborts the
-          // fork — same signal the streaming fallback uses at
-          // `signal: context.abortController.signal` below.
-          overrides: { abortController: context.abortController },
-        })
+        const result = await runCompactForkWithTimeout(
+          context.abortController,
+          forkAbortController =>
+            runForkedAgent({
+              promptMessages: [summaryRequest],
+              cacheSafeParams,
+              canUseTool: createCompactCanUseTool(),
+              querySource: 'compact',
+              forkLabel: 'compact',
+              maxTurns: 1,
+              skipCacheWrite: true,
+              // A child controller lets a stuck cache-sharing fork time out
+              // without poisoning the regular compact fallback signal.
+              overrides: { abortController: forkAbortController },
+            }),
+          getCompactForkTimeoutMs(),
+        )
         const assistantMsg = getLastAssistantMessage(result.messages)
         const assistantText = assistantMsg
           ? getAssistantMessageText(assistantMsg)
@@ -1272,10 +1293,16 @@ async function streamCompactSummary({
           preCompactTokenCount,
         })
       } catch (error) {
+        // Escape/Ctrl+C is not a cache-sharing failure. Propagate it instead
+        // of starting a second compact request with an aborted parent signal.
+        if (context.abortController.signal.aborted) {
+          throw new APIUserAbortError()
+        }
         logError(error)
         logEvent('tengu_compact_cache_sharing_fallback', {
-          reason:
-            'error' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          reason: (error instanceof CompactForkTimeoutError
+            ? 'timeout'
+            : 'error') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
           preCompactTokenCount,
         })
       }

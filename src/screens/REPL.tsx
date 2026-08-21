@@ -77,6 +77,7 @@ import { logForDebugging } from '../utils/debug.js';
 import { QueryGuard } from '../utils/QueryGuard.js';
 import { isEnvTruthy } from '../utils/envUtils.js';
 import { formatTokens, truncateToWidth } from '../utils/format.js';
+import { getThinkingTokenSummary } from '../utils/tokens.js';
 import { consumeEarlyInput } from '../utils/earlyInput.js';
 import {
   claimConsumableQueuedAutonomyCommands,
@@ -1147,7 +1148,6 @@ export function REPL({
   // race without touching keybinding registration order.
   const LOCAL_JSX_CLOSE_CANCEL_GRACE_MS = 500;
   const localJSXClosedAtRef = useRef(0);
-
   // Track whether the last turn was user-aborted (Ctrl+C / Escape).
   // When true, useGoalContinuation skips the continuation enqueue so
   // interrupted turns don't spin into an unstoppable loop. Reset to
@@ -1255,6 +1255,15 @@ export function REPL({
   // Used to compute total elapsed time (including teammate execution) for the deferred message
   const swarmStartTimeRef = React.useRef<number | null>(null);
   const swarmBudgetInfoRef = React.useRef<{ tokens: number; limit: number; nudges: number } | undefined>(undefined);
+  const swarmTokenStatsRef = React.useRef<
+    | {
+        outputTokens: number;
+        thinkingTokens: number;
+        thinkingTokensEstimated: boolean;
+      }
+    | undefined
+  >(undefined);
+  const turnMessageStartIndexRef = React.useRef(0);
 
   // Ref to track current focusedInputDialog for use in callbacks
   // This avoids stale closures when checking dialog state in timer callbacks
@@ -1931,8 +1940,10 @@ export function REPL({
     if (!hasRunningTeammates && swarmStartTimeRef.current !== null) {
       const totalMs = Date.now() - swarmStartTimeRef.current;
       const deferredBudget = swarmBudgetInfoRef.current;
+      const deferredTokenStats = swarmTokenStatsRef.current;
       swarmStartTimeRef.current = null;
       swarmBudgetInfoRef.current = undefined;
+      swarmTokenStatsRef.current = undefined;
       setMessages(prev => [
         ...prev,
         createTurnDurationMessage(
@@ -1944,6 +1955,7 @@ export function REPL({
           // would make checkResumeConsistency report false delta<0 for
           // every turn that ran a progress-emitting tool.
           count(prev, isLoggableMessage),
+          deferredTokenStats,
         ),
       ]);
     }
@@ -2593,7 +2605,12 @@ export function REPL({
     }
     setWasAborted(true);
 
-    queryGuard.forceEnd();
+    // Abort first, but keep queryGuard active until onQuery's finally confirms
+    // that the old turn has actually settled. forceEnd() used to reopen the
+    // guard before the native HTTP/SSE reader had exited, allowing a retry to
+    // overlap the cancelled request and deadlock in Bun's shared transport.
+    abortController?.abort('user-cancel');
+    logForDebugging('[onCancel] abort dispatched; waiting for query settlement');
     skipIdleCheckRef.current = false;
 
     // Preserve partially-streamed text so the user can read what was
@@ -2608,9 +2625,7 @@ export function REPL({
 
     // Clear any active token budget so the backstop doesn't fire on
     // a stale budget if the query generator hasn't exited yet.
-    if (feature('TOKEN_BUDGET')) {
-      snapshotOutputTokensForTurn(null);
-    }
+    snapshotOutputTokensForTurn(null);
 
     if (focusedInputDialog === 'tool-permission') {
       // Tool use confirm handles the abort signal itself
@@ -2622,12 +2637,9 @@ export function REPL({
         item.reject(new Error('Prompt cancelled by user'));
       }
       setPromptQueue([]);
-      abortController?.abort('user-cancel');
     } else if (activeRemote.isRemoteMode) {
       // Remote mode: send interrupt signal to CCR
       activeRemote.cancelRequest();
-    } else {
-      abortController?.abort('user-cancel');
     }
 
     // Clear the controller so subsequent Escape presses don't see a stale
@@ -2636,8 +2648,8 @@ export function REPL({
     // activating conditions hold — leaving the Escape keybinding inactive.
     setAbortController(null);
 
-    // forceEnd() skips the finally path — fire directly (aborted=true).
-    void mrOnTurnComplete(messagesRef.current, true);
+    // onQuery's finally owns turn completion. Keeping a single owner avoids
+    // duplicate cleanup and prevents a replacement query from starting early.
   }
 
   // Function to handle queued command when canceling a permission request
@@ -3661,12 +3673,14 @@ export function REPL({
         // isLoading is derived from queryGuard — tryStart() above already
         // transitioned dispatching→running, so no setter call needed here.
         resetTimingRefs();
+        turnMessageStartIndexRef.current = messagesRef.current.length;
         setMessages(oldMessages => [...oldMessages, ...newMessages]);
         responseLengthRef.current = 0;
+        let parsedBudget: number | null = null;
         if (feature('TOKEN_BUDGET')) {
-          const parsedBudget = input ? parseTokenBudget(input) : null;
-          snapshotOutputTokensForTurn(parsedBudget ?? getCurrentTurnTokenBudget());
+          parsedBudget = input ? parseTokenBudget(input) : null;
         }
+        snapshotOutputTokensForTurn(parsedBudget ?? getCurrentTurnTokenBudget());
         apiMetricsRef.current = [];
         setStreamingToolUses([]);
         setStreamingText(null);
@@ -3712,9 +3726,13 @@ export function REPL({
         }
       } finally {
         // queryGuard.end() atomically checks generation and transitions
-        // running→idle. Returns false if a newer query owns the guard
-        // (cancel+resubmit race where the stale finally fires as a microtask).
+        // running→idle. Interactive cancellation deliberately keeps this
+        // generation alive until this finally runs, so queued work cannot
+        // overlap the cancelled request's transport cleanup.
         if (queryGuard.end(thisGeneration)) {
+          if (abortController.signal.aborted) {
+            logForDebugging(`[onQuery] cancelled generation ${thisGeneration} settled`);
+          }
           setWasAborted(abortController.signal.aborted);
           setLastQueryCompletionTime(Date.now());
           skipIdleCheckRef.current = false;
@@ -3750,6 +3768,16 @@ export function REPL({
             });
           }
 
+          const turnOutputTokens = getTurnOutputTokens();
+          const thinkingTokenSummary = getThinkingTokenSummary(
+            messagesRef.current.slice(turnMessageStartIndexRef.current),
+          );
+          const turnTokenStats = {
+            outputTokens: turnOutputTokens,
+            thinkingTokens: thinkingTokenSummary.tokens,
+            thinkingTokensEstimated: thinkingTokenSummary.estimated,
+          };
+
           // Capture budget info before clearing (ant-only)
           let budgetInfo: { tokens: number; limit: number; nudges: number } | undefined;
           if (feature('TOKEN_BUDGET')) {
@@ -3759,13 +3787,13 @@ export function REPL({
               !abortController.signal.aborted
             ) {
               budgetInfo = {
-                tokens: getTurnOutputTokens(),
+                tokens: turnOutputTokens,
                 limit: getCurrentTurnTokenBudget()!,
                 nudges: getBudgetContinuationCount(),
               };
             }
-            snapshotOutputTokensForTurn(null);
           }
+          snapshotOutputTokensForTurn(null);
 
           // Add turn duration message for turns longer than 30s or with a budget
           // Skip if user aborted or if in loop mode (too noisy between ticks)
@@ -3788,10 +3816,19 @@ export function REPL({
               if (budgetInfo) {
                 swarmBudgetInfoRef.current = budgetInfo;
               }
+              const priorStats = swarmTokenStatsRef.current;
+              swarmTokenStatsRef.current = priorStats
+                ? {
+                    outputTokens: priorStats.outputTokens + turnTokenStats.outputTokens,
+                    thinkingTokens: priorStats.thinkingTokens + turnTokenStats.thinkingTokens,
+                    thinkingTokensEstimated:
+                      priorStats.thinkingTokensEstimated || turnTokenStats.thinkingTokensEstimated,
+                  }
+                : turnTokenStats;
             } else {
               setMessages(prev => [
                 ...prev,
-                createTurnDurationMessage(turnDurationMs, budgetInfo, count(prev, isLoggableMessage)),
+                createTurnDurationMessage(turnDurationMs, budgetInfo, count(prev, isLoggableMessage), turnTokenStats),
               ]);
             }
           }
@@ -3805,8 +3842,8 @@ export function REPL({
         // Auto-restore: if the user interrupted before any meaningful response
         // arrived, rewind the conversation and restore their prompt — same as
         // opening the message selector and picking the last message.
-        // This runs OUTSIDE the queryGuard.end() check because onCancel calls
-        // forceEnd(), which bumps the generation so end() returns false above.
+        // This runs OUTSIDE the queryGuard.end() check so teardown paths that
+        // force-end the guard can still restore an interrupted prompt.
         // Guards: reason === 'user-cancel' (onCancel/Esc; programmatic aborts
         // use 'background'/'interrupt' and must not rewind — note abort() with
         // no args sets reason to a DOMException, not undefined), !isActive (no

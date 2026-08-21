@@ -662,19 +662,19 @@ export const SettingsSchema = lazySchema(() =>
           'Skip the WebFetch blocklist check for enterprise environments with restrictive security policies',
         ),
       webSearchAdapter: z
-        .enum(['api', 'bing', 'brave', 'exa', 'tavily'])
+        .enum(['api', 'bing', 'brave', 'exa', 'serper', 'tavily'])
         .optional()
         .describe(
-          'Web search backend adapter. "tavily" uses Tavily Search API (default), ' +
+          'Web search backend adapter. "serper" uses the Serper Google Search API (default), ' +
             '"api" uses Anthropic server-side search, "bing" scrapes Bing HTML, ' +
-            '"brave" uses Brave Search API, "exa" uses Exa AI.',
+            '"brave" uses Brave Search API, "exa" uses Exa AI, and "tavily" uses Tavily Search API.',
         ),
       webFetchAdapter: z
         .enum(['tavily', 'http'])
         .optional()
         .describe(
-          'Web fetch backend. "tavily" uses Tavily Extract API which returns Markdown directly (default), ' +
-            '"http" fetches the URL directly via HTTP.',
+          'Web fetch backend. "http" fetches the URL through the dedicated WebFetch proxy (default), ' +
+            'while "tavily" uses Tavily Extract API and returns Markdown directly.',
         ),
       tavilyEndpointUrl: z
         .string()
@@ -1123,10 +1123,10 @@ export const SettingsSchema = lazySchema(() =>
         .array(z.string())
         .optional()
         .describe(
-          'Glob patterns or absolute paths of CLAUDE.md files to exclude from loading. ' +
+          'Glob patterns or absolute paths of project instruction files to exclude from loading (including CLAUDE.md and AGENTS.md). ' +
             'Patterns are matched against absolute file paths using picomatch. ' +
             'Only applies to User, Project, and Local memory types (Managed/policy files cannot be excluded). ' +
-            'Examples: "/home/user/monorepo/CLAUDE.md", "**/code/CLAUDE.md", "**/some-dir/.claude/rules/**"',
+            'Examples: "/home/user/monorepo/CLAUDE.md", "**/code/AGENTS.md", "**/some-dir/.claude/rules/**"',
         ),
       cacheThreshold: z
         .number()
