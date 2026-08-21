@@ -1,59 +1,29 @@
-import { describe, expect, test } from 'bun:test'
-import {
-  CompactForkTimeoutError,
-  DEFAULT_COMPACT_FORK_TIMEOUT_MS,
-  getCompactForkTimeoutMs,
-  runCompactForkWithTimeout,
-} from '../timeout.js'
+/**
+ * Cancellation tests depend on real AbortController propagation and timers.
+ * Run them outside the process-global mock.module() state of the full suite.
+ */
+import { describe, test } from 'bun:test'
+import { relative, resolve } from 'node:path'
+
+const PROJECT_ROOT = resolve(__dirname, '..', '..', '..', '..')
+const RUNNER_ABS = resolve(__dirname, 'timeout.runner.ts')
+const RUNNER_REL = './' + relative(PROJECT_ROOT, RUNNER_ABS).replace(/\\/g, '/')
 
 describe('compact fork timeout', () => {
-  test('returns a completed fork result', async () => {
-    const parent = new AbortController()
-    const result = await runCompactForkWithTimeout(
-      parent,
-      async () => 'summary',
-      100,
-    )
-    expect(result).toBe('summary')
-    expect(parent.signal.aborted).toBe(false)
-  })
-
-  test('times out only the fork controller', async () => {
-    const parent = new AbortController()
-    let forkSignal: AbortSignal | undefined
-
-    await expect(
-      runCompactForkWithTimeout(
-        parent,
-        async forkController => {
-          forkSignal = forkController.signal
-          return await new Promise<string>(() => {})
-        },
-        5,
-      ),
-    ).rejects.toBeInstanceOf(CompactForkTimeoutError)
-
-    expect(forkSignal?.aborted).toBe(true)
-    expect(parent.signal.aborted).toBe(false)
-  })
-
-  test('parent cancellation rejects when the operation does not settle', async () => {
-    const parent = new AbortController()
-    const pending = runCompactForkWithTimeout(
-      parent,
-      async () => await new Promise<string>(() => {}),
-      10_000,
-    )
-    const reason = new Error('user interrupted')
-    parent.abort(reason)
-    await expect(pending).rejects.toBe(reason)
-  })
-
-  test('uses the default for invalid timeout values', () => {
-    expect(getCompactForkTimeoutMs(undefined)).toBe(
-      DEFAULT_COMPACT_FORK_TIMEOUT_MS,
-    )
-    expect(getCompactForkTimeoutMs('0')).toBe(DEFAULT_COMPACT_FORK_TIMEOUT_MS)
-    expect(getCompactForkTimeoutMs('bad')).toBe(DEFAULT_COMPACT_FORK_TIMEOUT_MS)
-  })
+  test('runs cancellation tests in an isolated subprocess', async () => {
+    const proc = Bun.spawn([process.execPath, 'test', RUNNER_REL], {
+      cwd: PROJECT_ROOT,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const code = await proc.exited
+    if (code !== 0) {
+      const stderr = await new Response(proc.stderr).text()
+      const stdout = await new Response(proc.stdout).text()
+      const output = (stderr + '\n' + stdout).slice(-3000)
+      throw new Error(
+        `compact timeout test subprocess failed (exit ${code}):\n${output}`,
+      )
+    }
+  }, 60_000)
 })
