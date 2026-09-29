@@ -1,5 +1,8 @@
 import type { RefObject } from 'react';
 import * as React from 'react';
+import { appendFile, mkdir } from 'fs/promises';
+import { homedir } from 'os';
+import { join } from 'path';
 import { useCallback, useContext, useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore } from 'react';
 import { useVirtualScroll } from '../hooks/useVirtualScroll.js';
 import { Box, type DOMElement, type ScrollBoxHandle, type MatchPosition } from '@anthropic/ink';
@@ -286,6 +289,63 @@ export function VirtualMessageList({
   prevMessagesRef.current = messages;
   prevItemKeyRef.current = itemKey;
   const keys = keysRef.current;
+
+  // [ccb mod] Transcript-duplication tripwire (2026-09-18). Users see
+  // identical tool-result blocks (⎿ header + duration) stacked several times
+  // when scrolling the fullscreen transcript; the on-disk jsonl holds a single
+  // copy (the uuid-keyed loader dedups), so the duplication must exist in the
+  // live `messages` array itself. This is the one aggregation point every
+  // transcript message passes through — scan the keys for duplicates and, on
+  // a new signature, append the pattern (indices, neighbor uuids, stack) to a
+  // dedicated log so the next live occurrence pinpoints the append source.
+  // Gated on length change: the scan is O(n) and streaming commits append one
+  // message at a time, so this runs at most once per append.
+  const dupScanLenRef = useRef(-1);
+  const dupLastSigRef = useRef<string | null>(null);
+  if (messages.length !== dupScanLenRef.current) {
+    dupScanLenRef.current = messages.length;
+    const firstIdx = new Map<string, number>();
+    const dups = new Map<string, number[]>();
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i]!;
+      const first = firstIdx.get(k);
+      if (first === undefined) {
+        firstIdx.set(k, i);
+      } else {
+        const arr = dups.get(k);
+        if (arr) arr.push(i);
+        else dups.set(k, [first, i]);
+      }
+    }
+    if (dups.size > 0) {
+      const sig = [...dups.entries()].map(([k, idxs]) => `${k.slice(0, 8)}@${idxs.join('/')}`).join('|');
+      if (sig !== dupLastSigRef.current) {
+        dupLastSigRef.current = sig;
+        const neighbors = (idxs: number[]) => {
+          const i = idxs[0]!;
+          const lo = Math.max(0, i - 2);
+          const hi = Math.min(keys.length - 1, idxs[idxs.length - 1]! + 2);
+          return keys
+            .slice(lo, hi + 1)
+            .map((x, j) => `${lo + j}:${x.slice(0, 8)}`)
+            .join(' ');
+        };
+        const detail = [...dups.entries()]
+          .slice(0, 10)
+          .map(([k, idxs]) => `uuid=${k} at=[${idxs.join(',')}] ctx=[${neighbors(idxs)}]`)
+          .join('\n  ');
+        const stack = (new Error().stack ?? '').split('\n').slice(2, 9).join('\n');
+        const line = `[${new Date().toISOString()}] n=${messages.length} dupKeys=${dups.size}\n  ${detail}\n${stack}\n`;
+        logForDebugging(`[dup-tripwire] ${dups.size} duplicated keys at n=${messages.length}`);
+        const dir = join(homedir(), '.claude', 'logs');
+        void mkdir(dir, { recursive: true })
+          .then(() => appendFile(join(dir, 'ccb-dup-tripwire.log'), line))
+          .catch(() => {});
+      }
+    } else {
+      dupLastSigRef.current = null;
+    }
+  }
   const {
     range,
     topSpacer,

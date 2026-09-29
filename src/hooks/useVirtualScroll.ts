@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
 } from 'react'
 import type { ScrollBoxHandle, DOMElement } from '@anthropic/ink'
@@ -160,6 +161,7 @@ export function useVirtualScroll(
   columns: number,
 ): VirtualScrollResult {
   const heightCache = useRef(new Map<string, number>())
+  const [, refreshRange] = useState(0)
   // Bump whenever heightCache mutates so offsets rebuild on next read. Ref
   // (not state) — checked during render phase, zero extra commits.
   const offsetVersionRef = useRef(0)
@@ -610,11 +612,7 @@ export function useVirtualScroll(
   // at the start boundary freezes the range (seen as blank viewport when
   // scrolling down after scrolling up).
   //
-  // NO setState. A setState here would schedule a second commit with
-  // shifted offsets, and since Ink writes stdout on every commit
-  // (reconciler.resetAfterCommit → onRender), that's two writes with
-  // different spacer heights → visible flicker. Heights propagate to
-  // offsets on the next natural render. One-frame lag, absorbed by overscan.
+  // Keep measurements lazy unless a shrinking tail exhausts the mounted coverage.
   useLayoutEffect(() => {
     const spacerYoga = spacerRef.current?.yogaNode
     if (spacerYoga && spacerYoga.getComputedWidth() > 0) {
@@ -624,11 +622,50 @@ export function useVirtualScroll(
       skipMeasurementRef.current = false
       return
     }
+    // [ccb mod] Scroll anchoring (BUG-2 fullscreen). Capture the viewport-top
+    // anchor item BEFORE heightCache mutates. When an item ABOVE the viewport
+    // gets its estimate→real height correction, offsets[] shift but scrollTop
+    // doesn't, so the painted content jumps — scrolling up then "replays" the
+    // same history (visual duplication; the data has a single copy). We record
+    // the anchor's old offset here and, after the heights land, scrollBy the
+    // delta so the content under the viewport top stays put.
+    //
+    // Uses the RENDER-TIME scrollTop / listOrigin / offsets — the three values
+    // this commit's range math was built from, so they're mutually consistent.
+    // Skipped when sticky: render-node-to-output pins scrollTop=maxScroll
+    // there, and a compensating scrollBy would fight the pin (and the prepend
+    // anchor in useAssistantHistory already covers the sticky-at-bottom case).
+    const oldOffsets = offsetsRef.current.arr
+    let anchorIndex = -1
+    let oldAnchorOffset = 0
+    if (
+      !isSticky &&
+      scrollTop >= 0 &&
+      viewportH > 0 &&
+      offsetsRef.current.n === n
+    ) {
+      const listLocalTop = scrollTop - listOrigin
+      // First item whose bottom edge sits below the viewport top = the item
+      // spanning the viewport top. offsets is monotone → binary search O(log n).
+      let l = 0
+      let r = n
+      while (l < r) {
+        const m = (l + r) >> 1
+        if (oldOffsets[m + 1]! <= listLocalTop) l = m + 1
+        else r = m
+      }
+      if (l < n) {
+        anchorIndex = l
+        oldAnchorOffset = oldOffsets[l]!
+      }
+    }
     let anyChanged = false
+    let mountedHeight = 0
     for (const [key, el] of itemRefs.current) {
       const yoga = el.yogaNode
       if (!yoga) continue
       const h = yoga.getComputedHeight()
+      mountedHeight += h
       const prev = heightCache.current.get(key)
       if (h > 0) {
         if (prev !== h) {
@@ -640,7 +677,42 @@ export function useVirtualScroll(
         anyChanged = true
       }
     }
-    if (anyChanged) offsetVersionRef.current++
+    if (anyChanged) {
+      offsetVersionRef.current++
+      // [ccb mod] Apply the anchoring compensation. Recompute the anchor's
+      // offset from the just-updated heightCache via a BOUNDED prefix sum:
+      // items below effStart are unmounted and weren't measured this commit,
+      // so oldOffsets[effStart] is a valid base — we only re-sum the mounted
+      // span [effStart, anchorIndex), O(mounted) not O(n). delta = how much
+      // the anchor moved; scrollBy(delta) keeps it visually pinned.
+      if (anchorIndex >= 0) {
+        const base = anchorIndex < effStart ? anchorIndex : effStart
+        let newAnchorOffset = oldOffsets[base]!
+        for (let i = base; i < anchorIndex; i++) {
+          newAnchorOffset +=
+            heightCache.current.get(itemKeys[i]!) ?? DEFAULT_ESTIMATE
+        }
+        let delta = newAnchorOffset - oldAnchorOffset
+        // Full compensation is required — a tight per-frame cap would leave
+        // residual drift (the same item is only measured once, so there's no
+        // second chance to catch up). The cap here is a pure runaway guard;
+        // render-node-to-output also clamps scrollTop to [0, maxScroll].
+        const cap = totalHeight + viewportH
+        if (delta > cap) delta = cap
+        else if (delta < -cap) delta = -cap
+        if (delta !== 0) {
+          scrollRef.current?.scrollBy(delta)
+        }
+      }
+      // A collapsed tail can expose the top spacer without another scroll event.
+      if (
+        isSticky &&
+        effStart > 0 &&
+        mountedHeight < viewportH + OVERSCAN_ROWS
+      ) {
+        refreshRange(version => version + 1)
+      }
+    }
   })
 
   // Stable per-key callback refs. React's ref-swap dance (old(null) then

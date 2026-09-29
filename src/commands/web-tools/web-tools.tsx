@@ -23,6 +23,7 @@ type SettingsJson = Record<string, unknown> & {
   webSearchAdapter?: 'api' | 'bing' | 'brave' | 'exa' | 'serper' | 'tavily';
   webFetchAdapter?: 'tavily' | 'http';
   tavilyEndpointUrl?: string;
+  tavilyApiKey?: string;
   braveApiKey?: string;
   webFetchHttpTimeoutMs?: number;
   exaApiKey?: string;
@@ -35,26 +36,36 @@ type ViewState = { kind: 'main' } | { kind: 'config'; adapter: AdapterMeta };
 
 const SEARCH_ADAPTERS: AdapterMeta[] = [
   {
+    key: 'tavily',
+    label: 'Tavily',
+    description: 'Tavily Search API (needs API key; default when configured)',
+    hasConfig: true,
+  },
+  {
     key: 'serper',
     label: 'Serper',
-    description: 'Serper Google Search API (default; uses SERPER_API_KEY)',
+    description: 'Serper Google Search API (uses SERPER_API_KEY)',
     hasConfig: false,
   },
-  { key: 'tavily', label: 'Tavily', description: 'Tavily Search API', hasConfig: true },
   { key: 'api', label: 'Anthropic API', description: 'Anthropic server-side web search', hasConfig: false },
-  { key: 'bing', label: 'Bing', description: 'Scrape Bing HTML results', hasConfig: false },
+  { key: 'bing', label: 'Bing', description: 'Scrape Bing HTML results (key-free default)', hasConfig: false },
   { key: 'brave', label: 'Brave', description: 'Brave Search API (needs API key)', hasConfig: true },
   { key: 'exa', label: 'Exa', description: 'Exa AI search (MCP endpoint)', hasConfig: true },
 ];
 
 const FETCH_ADAPTERS: AdapterMeta[] = [
   {
-    key: 'http',
-    label: 'HTTP + VPN',
-    description: 'Fetch through the dedicated WebFetch proxy (default)',
+    key: 'tavily',
+    label: 'Tavily Extract',
+    description: 'Use Tavily /extract (needs API key; default when configured)',
     hasConfig: true,
   },
-  { key: 'tavily', label: 'Tavily Extract', description: 'Use Tavily /extract', hasConfig: true },
+  {
+    key: 'http',
+    label: 'HTTP',
+    description: 'Fetch via HTTP with optional dedicated proxy (key-free default)',
+    hasConfig: true,
+  },
 ];
 
 // ── Config field definitions ───────────────────────────────────────────────
@@ -169,11 +180,19 @@ function getConfigFields(adapter: AdapterMeta): ConfigField[] {
   switch (adapter.key) {
     case 'tavily':
       fields.push({
+        key: 'tavilyApiKey',
+        label: 'API Key',
+        placeholder: 'tvly-... (or set TAVILY_API_KEY env)',
+        maskInput: true,
+        getValue: s => s.tavilyApiKey ?? '',
+        setValue: (s, v) => ({ ...s, tavilyApiKey: v || undefined }),
+      });
+      fields.push({
         key: 'tavilyEndpointUrl',
         label: 'Endpoint URL',
-        placeholder: 'https://tavily.claude-code-best.win',
+        placeholder: 'https://api.tavily.com (default; set only for a custom relay)',
         maskInput: false,
-        getValue: s => s.tavilyEndpointUrl ?? 'https://tavily.claude-code-best.win',
+        getValue: s => s.tavilyEndpointUrl ?? '',
         setValue: (s, v) => ({ ...s, tavilyEndpointUrl: v || undefined }),
       });
       break;

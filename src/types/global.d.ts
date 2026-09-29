@@ -8,6 +8,7 @@
 // and Bun.build({ define }) (production). See bunfig.toml & build.ts.
 declare namespace MACRO {
   export const VERSION: string
+  export const BUILD_VERSION: string
   export const BUILD_TIME: string
   export const FEEDBACK_CHANNEL: string
   export const ISSUES_EXPLAINER: string

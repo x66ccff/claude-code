@@ -15,3 +15,16 @@ credentials.json export-ignore
 .github/workflows/publish-npm.yml export-ignore
 .github/workflows/release-rcs.yml export-ignore
 .github/workflows/update-contributors.yml export-ignore
+
+# Personal learning records and private configuration must not enter archives.
+teach-me/ export-ignore
+teach-me/** export-ignore
+.env export-ignore
+.env.* export-ignore
+.env.example -export-ignore
+*.pem export-ignore
+*.p12 export-ignore
+*.pfx export-ignore
+*.key export-ignore
+settings.local.json export-ignore
+CLAUDE.local.md export-ignore

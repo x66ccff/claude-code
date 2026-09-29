@@ -47,6 +47,7 @@ import {
 import { type SettingsJson, SettingsSchema } from './types.js'
 import {
   filterInvalidPermissionRules,
+  filterUnknownHookEvents,
   formatZodError,
   type SettingsWithErrors,
   type ValidationError,
@@ -215,6 +216,19 @@ function parseSettingsFileUncached(path: string): {
     // Filter invalid permission rules before schema validation so one bad
     // rule doesn't cause the entire settings file to be rejected.
     const ruleWarnings = filterInvalidPermissionRules(data, path)
+    // Strip hook events this build doesn't know (e.g. written by a newer
+    // official Claude Code sharing the same settings.json) so they don't
+    // reject the entire file — env/API key would be lost with it.
+    // Deliberately NOT surfaced as ValidationErrors: unknown events are a
+    // forward-compat fact, not a user-fixable error, and the official CLI
+    // keeps rewriting them — a warning would re-trigger the blocking
+    // InvalidSettingsDialog on every startup. Debug log only.
+    const hookWarnings = filterUnknownHookEvents(data, path)
+    if (hookWarnings.length > 0) {
+      logForDebugging(
+        `Skipped unknown hook events in ${path}: ${hookWarnings.map(w => w.path).join(', ')}`,
+      )
+    }
 
     const result = SettingsSchema().safeParse(data)
 

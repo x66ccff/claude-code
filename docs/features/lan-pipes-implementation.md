@@ -7,7 +7,7 @@
 ## 架构
 
 ```
-Machine A (192.168.50.22)                Machine B (192.168.50.27)
+Machine A (192.0.2.10)                Machine B (192.0.2.20)
 ┌───────────────────────────┐           ┌───────────────────────────┐
 │ PipeServer                │           │ PipeServer                │
 │   UDS: ~/.claude/pipes/   │           │   UDS: ~/.claude/pipes/   │
@@ -261,9 +261,9 @@ Windows/macOS 使用 `execFile`（异步），不阻塞主线程。结果缓存�
 ## 跨机器 Attach 流程
 
 ```
-CLI-B (192.168.50.27) 心跳循环
-  → beacon.getPeers() 发现 CLI-A (192.168.50.22)
-  → connectToPipe(pName, myName, 3000, { host: '192.168.50.22', port: 58853 })
+CLI-B (192.0.2.20) 心跳循环
+  → beacon.getPeers() 发现 CLI-A (192.0.2.10)
+  → connectToPipe(pName, myName, 3000, { host: '192.0.2.10', port: 58853 })
   → PipeClient.connectTcp() → net.createConnection({ host, port })
   → client.send({ type: 'attach_request', meta: { machineId } })
   → CLI-A 收到：

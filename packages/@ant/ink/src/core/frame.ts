@@ -81,6 +81,16 @@ export type Patch =
       // flicker to its source React component.
       debug?: { triggerY: number; prevLine: string; nextLine: string }
     }
+  // [ccb mod] Degraded full reset for terminals that ignore CSI 3J (zellij):
+  // erase the viewport in place (2J + home, no scrollback clear) and repaint
+  // only the viewport-tail slice — avoids appending a duplicate transcript
+  // copy to the scrollback on every reset. Written by terminal.ts; ink.tsx
+  // counts it as a flicker event like clearTerminal.
+  | {
+      type: 'clearViewport'
+      reason: FlickerReason
+      debug?: { triggerY: number; prevLine: string; nextLine: string }
+    }
   | { type: 'cursorHide' }
   | { type: 'cursorShow' }
   | { type: 'cursorMove'; x: number; y: number }

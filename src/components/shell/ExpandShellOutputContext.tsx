@@ -10,6 +10,11 @@ import { useContext } from 'react';
  */
 const ExpandShellOutputContext = React.createContext(false);
 
+export const ToolOutputExpansionContext = React.createContext<{
+  expanded: boolean;
+  toggle: () => void;
+} | null>(null);
+
 export function ExpandShellOutputProvider({ children }: { children: React.ReactNode }): React.ReactNode {
   return <ExpandShellOutputContext.Provider value={true}>{children}</ExpandShellOutputContext.Provider>;
 }

@@ -37,10 +37,10 @@ bun run dev
 ### 局域网多机器
 
 ```bash
-# 机器 A (192.168.50.22)
+# 机器 A (192.0.2.10)
 bun run dev
 
-# 机器 B (192.168.50.27)
+# 机器 B (192.0.2.20)
 bun run dev
 ```
 
@@ -83,7 +83,7 @@ sudo iptables -A INPUT -p tcp --dport 1024:65535 -m owner --uid-owner $(id -u) -
 执行 `/pipes` 后，输入框底部出现 pipe 状态栏（单行）：
 
 ```
-pipe: cli-a91bad56 (main) 192.168.50.22  2/3 selected  selected pipes only · ←/→ or m switch · Shift+↓ edit
+pipe: cli-a91bad56 (main) 192.0.2.10  2/3 selected  selected pipes only · ←/→ or m switch · Shift+↓ edit
 ```
 
 状态栏始终可见（直到会话结束），显示：当前 pipe 名、角色、IP、已选数/总数、路由模式。
@@ -93,11 +93,11 @@ pipe: cli-a91bad56 (main) 192.168.50.22  2/3 selected  selected pipes only · �
 按 **Shift+↓**（Shift + 下箭头）展开选择面板：
 
 ```
-pipe: cli-a91bad56 (main) 192.168.50.22  ↑↓ move Space select ←/→ or m route Enter/Esc close Shift+↓ toggle
+pipe: cli-a91bad56 (main) 192.0.2.10  ↑↓ move Space select ←/→ or m route Enter/Esc close Shift+↓ toggle
   当前普通 prompt 走 已选 sub；切换不会清空选择
-  ☑ cli-da029538 (sub-1 XC/192.168.50.22)
-  ☐ cli-04d67950 (main vmwin11/192.168.50.27)
-  ☑ cli-893747d3 [offline] (sub-2 vmwin11/192.168.50.27)
+  ☑ cli-da029538 (sub-1 host-a/192.0.2.10)
+  ☐ cli-04d67950 (main host-b/192.0.2.20)
+  ☑ cli-893747d3 [offline] (sub-2 host-b/192.0.2.20)
 ```
 
 ### 面板内快捷键
@@ -156,15 +156,15 @@ M 键（或 ← / →）用于在两种路由模式之间切换，**无需展开
 Your pipe:   cli-a91bad56
 Role:        main
 Machine ID:  205d6c3a...
-IP:          192.168.50.22
+IP:          192.0.2.10
 Host:        XC
 
 Main machine: 205d6c3a... (this machine)
-  [main] cli-a91bad56  XC/192.168.50.22  [alive] (you)
-  ☑ [sub-1] cli-da029538  XC/192.168.50.22  [alive] [connected]
+  [main] cli-a91bad56  host-a/192.0.2.10  [alive] (you)
+  ☑ [sub-1] cli-da029538  host-a/192.0.2.10  [alive] [connected]
 
 LAN Peers:
-  ☐ [main] cli-04d67950  vmwin11/192.168.50.27  tcp:192.168.50.27:58853  [LAN]
+  ☐ [main] cli-04d67950  host-b/192.0.2.20  tcp:192.0.2.20:58853  [LAN]
 
 Selected: cli-da029538
 ```
@@ -193,7 +193,7 @@ attach 后，对方变为 slave，你变为 master。可以向它发送 prompt�
 
 ```
 /send cli-04d67950 请帮我检查一下日志
-/send tcp:192.168.50.27:58853 hello    — 直接通过 TCP 地址发送
+/send tcp:192.0.2.20:58853 hello    — 直接通过 TCP 地址发送
 ```
 
 ### /claim-main

@@ -1,3 +1,4 @@
+import { HOOK_EVENTS } from 'src/entrypoints/agentSdkTypes.js'
 import type { ConfigScope } from 'src/services/mcp/types.js'
 import type { ZodError, ZodIssue } from 'zod/v4'
 import { jsonParse } from '../slowOperations.js'
@@ -262,6 +263,41 @@ export function filterInvalidPermissionRules(
       }
       return true
     })
+  }
+  return warnings
+}
+
+/**
+ * Filters unknown hook event keys from raw parsed JSON data before schema
+ * validation. Newer Claude Code versions (e.g. the official CLI sharing the
+ * same ~/.claude/settings.json on macOS) may write hook events this build
+ * doesn't know about (PostToolBatch, UserPromptExpansion, ...). Without this
+ * filter the z.enum-keyed hooks record fails with "Invalid key in record" and
+ * the ENTIRE settings file is skipped — taking env vars (API key, base URL)
+ * down with it. Unknown events are stripped with a warning instead, so the
+ * rest of the file still loads.
+ */
+export function filterUnknownHookEvents(
+  data: unknown,
+  filePath: string,
+): ValidationError[] {
+  if (!data || typeof data !== 'object') return []
+  const obj = data as Record<string, unknown>
+  if (!obj.hooks || typeof obj.hooks !== 'object') return []
+  const hooks = obj.hooks as Record<string, unknown>
+
+  const knownEvents = new Set<string>(HOOK_EVENTS)
+  const warnings: ValidationError[] = []
+  for (const key of Object.keys(hooks)) {
+    if (!knownEvents.has(key)) {
+      warnings.push({
+        file: filePath,
+        path: `hooks.${key}`,
+        message: `Unknown hook event "${key}" was skipped (not supported by this build)`,
+        invalidValue: hooks[key],
+      })
+      delete hooks[key]
+    }
   }
   return warnings
 }

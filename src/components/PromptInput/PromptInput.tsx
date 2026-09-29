@@ -447,6 +447,16 @@ function PromptInput({
     [tasks],
   );
   const minCoordinatorIndex = hasBgTaskPill ? -1 : 0;
+  // When every pill-visible bg task is a local workflow, opening the pill goes
+  // straight to the /workflows monitor panel (live progress, per-agent marquees)
+  // instead of the generic BackgroundTasksDialog, which for workflows only says
+  // "type /workflows" — an extra hop the user explicitly shouldn't have to take.
+  const allBgTasksAreWorkflows = useMemo(() => {
+    const bg = Object.values(tasks).filter(
+      t => isBackgroundTask(t) && !(process.env.USER_TYPE === 'ant' && isPanelAgentTask(t)),
+    );
+    return bg.length > 0 && bg.every(t => t.type === 'local_workflow');
+  }, [tasks]);
   // Clamp index when tasks complete and the list shrinks beneath the cursor
   useEffect(() => {
     if (coordinatorTaskIndex >= coordinatorTaskCount) {
@@ -1279,6 +1289,16 @@ function PromptInput({
     ],
   );
 
+  // Click-to-send quick phrase pills (rendered in the footer). Route through the
+  // same internal onSubmit used by Enter so the phrase is submitted verbatim and
+  // the input box is cleared by the normal submission path.
+  const submitQuickPhrase = useCallback(
+    (phrase: string) => {
+      void onSubmit(phrase);
+    },
+    [onSubmit],
+  );
+
   const { suggestions, selectedSuggestion, commandArgumentHint, inlineGhostText, maxColumnWidth } = useTypeahead({
     commands,
     onInputChange: trackAndSetInput,
@@ -1865,7 +1885,11 @@ function PromptInput({
           return;
         }
         if (tasksSelected && !isTeammateMode) {
-          setShowBashesDialog(true);
+          if (allBgTasksAreWorkflows) {
+            void onSubmit('/workflows');
+          } else {
+            setShowBashesDialog(true);
+          }
           selectFooterItem(null);
           return;
         }
@@ -1914,6 +1938,9 @@ function PromptInput({
               const selectedTaskId = getVisibleAgentTasks(tasks)[coordinatorTaskIndex - 1]?.id;
               if (selectedTaskId) {
                 enterTeammateView(selectedTaskId, setAppState);
+              } else if (allBgTasksAreWorkflows) {
+                void onSubmit('/workflows');
+                selectFooterItem(null);
               } else {
                 setShowBashesDialog(true);
                 selectFooterItem(null);
@@ -2145,8 +2172,16 @@ function PromptInput({
   );
 
   const handleOpenTasksDialog = useCallback(
-    (taskId?: string) => setShowBashesDialog(taskId ?? true),
-    [setShowBashesDialog],
+    (taskId?: string) => {
+      // Pill click with no specific task: workflows-only bg goes straight to
+      // the /workflows monitor panel (same as ↓/Enter on the pill).
+      if (!taskId && allBgTasksAreWorkflows) {
+        void onSubmit('/workflows');
+        return;
+      }
+      setShowBashesDialog(taskId ?? true);
+    },
+    [allBgTasksAreWorkflows, onSubmit, setShowBashesDialog],
   );
 
   const placeholder = showPromptSuggestion && promptSuggestion ? promptSuggestion : defaultPlaceholder;
@@ -2554,6 +2589,7 @@ function PromptInput({
         setHistoryQuery={setHistoryQuery}
         historyFailedMatch={historyFailedMatch}
         onOpenTasksDialog={isFullscreenEnvEnabled() ? handleOpenTasksDialog : undefined}
+        onQuickPhrase={submitQuickPhrase}
       />
       {isFullscreenEnvEnabled() ? (
         // position=absolute takes zero layout height so the spinner

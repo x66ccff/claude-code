@@ -163,6 +163,12 @@ import type { AppState } from '../state/AppState.js'
 import { jsonStringify, jsonParse } from './slowOperations.js'
 import { isEnvTruthy } from './envUtils.js'
 import { errorMessage, getErrnoCode } from './errors.js'
+import {
+  findBlockedMacosHook,
+  formatInjectionPolicyRejection,
+  sanitizeHookDisplayText,
+  type InjectionPolicyMatch,
+} from './hooks/platformHookPolicy.js'
 
 const TOOL_HOOK_EXECUTION_TIMEOUT_MS = 10 * 60 * 1000
 
@@ -1574,8 +1580,76 @@ type MatchedHook = {
   hookSource?: string
 }
 
+type HookExecutionRecord = {
+  hookId: string
+  startMs: number
+  hookSource: string
+  hookType: MatchedHook['hook']['type']
+  displayInput: string
+  stdout?: string
+  stderr?: string
+  exitCode?: number
+  suppressOutput?: boolean
+}
+
 function isInternalHook(matched: MatchedHook): boolean {
   return matched.hook.type === 'callback' && matched.hook.internal === true
+}
+
+function updateHookExecutionFromResult(
+  execution: HookExecutionRecord,
+  result: HookResult,
+): void {
+  const resultAttachment =
+    result.message?.type === 'attachment'
+      ? result.message.attachment
+      : undefined
+  if (
+    resultAttachment?.type === 'hook_success' ||
+    resultAttachment?.type === 'hook_non_blocking_error'
+  ) {
+    if (typeof resultAttachment.stdout === 'string') {
+      execution.stdout ??= resultAttachment.stdout
+    }
+    if (typeof resultAttachment.stderr === 'string') {
+      execution.stderr ??= resultAttachment.stderr
+    }
+    if (typeof resultAttachment.exitCode === 'number') {
+      execution.exitCode ??= resultAttachment.exitCode
+    }
+  } else if (
+    resultAttachment?.type === 'hook_error_during_execution' &&
+    typeof resultAttachment.content === 'string'
+  ) {
+    execution.stderr ??= resultAttachment.content
+  }
+  if (result.blockingError) {
+    execution.stderr ??= result.blockingError.blockingError
+  }
+}
+
+function emitHookResultResponse(
+  execution: HookExecutionRecord,
+  hookName: string,
+  hookEvent: HookEvent,
+  result: HookResult,
+): void {
+  updateHookExecutionFromResult(execution, result)
+  emitHookResponse({
+    hookId: execution.hookId,
+    hookName,
+    hookEvent,
+    output: execution.stdout ?? execution.stderr ?? '',
+    stdout: execution.stdout ?? '',
+    stderr: execution.stderr ?? '',
+    exitCode: execution.exitCode,
+    outcome:
+      result.outcome === 'success'
+        ? 'success'
+        : result.outcome === 'cancelled'
+          ? 'cancelled'
+          : 'error',
+  })
 }
 
 /**
@@ -1742,6 +1816,10 @@ export async function getMatchingHooks(
   hookEvent: HookEvent,
   hookInput: HookInput,
   tools?: Tools,
+  onPolicyRejected?: (
+    matchedHook: MatchedHook,
+    match: InjectionPolicyMatch,
+  ) => void,
 ): Promise<MatchedHook[]> {
   try {
     const hookMatchers = getHooksConfig(appState, sessionId, hookEvent)
@@ -1844,6 +1922,22 @@ export async function getMatchingHooks(
         hookSource,
       }))
     })
+    const policyAllowedHooks = matchedHooks.filter(matchedHook => {
+      const policyMatch = findBlockedMacosHook(matchedHook.hook, {
+        source: matchedHook.hookSource,
+        pluginId: matchedHook.pluginId,
+        pluginRoot: matchedHook.pluginRoot,
+        skillRoot: matchedHook.skillRoot,
+      })
+      if (!policyMatch) return true
+
+      onPolicyRejected?.(matchedHook, policyMatch)
+      logForDebugging(
+        `Skipping ${hookEvent} hook ${formatInjectionPolicyRejection(policyMatch)}`,
+        { level: 'warn' },
+      )
+      return false
+    })
 
     // Deduplicate hooks by command/prompt/url within the same source context.
     // Key is namespaced by pluginRoot/skillRoot (see hookDedupKey above) so
@@ -1857,11 +1951,11 @@ export async function getMatchingHooks(
     // callback/function — the common case for internal hooks like
     // sessionFileAccessHooks/attributionHooks (44x faster in microbench).
     if (
-      matchedHooks.every(
+      policyAllowedHooks.every(
         m => m.hook.type === 'callback' || m.hook.type === 'function',
       )
     ) {
-      return matchedHooks
+      return policyAllowedHooks
     }
 
     // Helper to extract the `if` condition from a hook for dedup keys.
@@ -1870,7 +1964,7 @@ export async function getMatchingHooks(
 
     const uniqueCommandHooks = Array.from(
       new Map(
-        matchedHooks
+        policyAllowedHooks
           .filter(
             (
               m,
@@ -1892,7 +1986,7 @@ export async function getMatchingHooks(
     )
     const uniquePromptHooks = Array.from(
       new Map(
-        matchedHooks
+        policyAllowedHooks
           .filter(m => m.hook.type === 'prompt')
           .map(m => [
             hookDedupKey(
@@ -1905,7 +1999,7 @@ export async function getMatchingHooks(
     )
     const uniqueAgentHooks = Array.from(
       new Map(
-        matchedHooks
+        policyAllowedHooks
           .filter(m => m.hook.type === 'agent')
           .map(m => [
             hookDedupKey(
@@ -1918,7 +2012,7 @@ export async function getMatchingHooks(
     )
     const uniqueHttpHooks = Array.from(
       new Map(
-        matchedHooks
+        policyAllowedHooks
           .filter(m => m.hook.type === 'http')
           .map(m => [
             hookDedupKey(
@@ -1929,9 +2023,13 @@ export async function getMatchingHooks(
           ]),
       ).values(),
     )
-    const callbackHooks = matchedHooks.filter(m => m.hook.type === 'callback')
+    const callbackHooks = policyAllowedHooks.filter(
+      m => m.hook.type === 'callback',
+    )
     // Function hooks don't need deduplication - each callback is unique
-    const functionHooks = matchedHooks.filter(m => m.hook.type === 'function')
+    const functionHooks = policyAllowedHooks.filter(
+      m => m.hook.type === 'function',
+    )
     const uniqueHooks = [
       ...uniqueCommandHooks,
       ...uniquePromptHooks,
@@ -2137,13 +2235,43 @@ async function* executeHooks({
   const appState = toolUseContext ? toolUseContext.getAppState() : undefined
   // Use the agent's session ID if available, otherwise fall back to main session
   const sessionId = toolUseContext?.agentId ?? getSessionId()
+  const policyRejectedHooks: Array<{
+    matchedHook: MatchedHook
+    match: InjectionPolicyMatch
+  }> = []
   const matchingHooks = await getMatchingHooks(
     appState,
     sessionId,
     hookEvent,
     hookInput,
     toolUseContext?.options?.tools,
+    (matchedHook, match) => policyRejectedHooks.push({ matchedHook, match }),
   )
+
+  for (const { matchedHook, match } of policyRejectedHooks) {
+    const hookId = randomUUID()
+    const hookSource = matchedHook.hookSource ?? 'settings'
+    const hookType = matchedHook.hook.type
+    const displayInput = sanitizeHookDisplayText(
+      getHookDisplayText(matchedHook.hook),
+    )
+    const rejection = formatInjectionPolicyRejection(match)
+    emitHookStarted(hookId, hookName, hookEvent, {
+      hookSource,
+      hookType,
+      displayInput,
+    })
+    emitHookResponse({
+      hookId,
+      hookName,
+      hookEvent,
+      output: rejection,
+      stdout: '',
+      stderr: rejection,
+      outcome: 'rejected',
+    })
+  }
+
   if (matchingHooks.length === 0) {
     return
   }
@@ -2227,17 +2355,33 @@ async function* executeHooks({
     hookDefinitionsJson,
   )
 
-  // Yield progress messages for each hook before execution
-  for (const { hook } of matchingHooks) {
+  const hookExecutions: HookExecutionRecord[] = []
+  for (const matchedHook of matchingHooks) {
+    const { hook } = matchedHook
+    const execution: HookExecutionRecord = {
+      hookId: randomUUID(),
+      startMs: Date.now(),
+      hookSource: matchedHook.hookSource ?? 'settings',
+      hookType: hook.type,
+      displayInput: sanitizeHookDisplayText(getHookDisplayText(hook)),
+    }
+    hookExecutions.push(execution)
+
+    if (isInternalHook(matchedHook)) continue
     yield {
       message: {
         type: 'progress',
         data: {
           type: 'hook_progress',
+          hookId: execution.hookId,
           hookEvent,
           hookName,
-          command: getHookDisplayText(hook),
-          ...(hook.type === 'prompt' && { promptText: hook.prompt }),
+          hookSource: execution.hookSource,
+          hookType: execution.hookType,
+          command: execution.displayInput,
+          ...(hook.type === 'prompt' && {
+            promptText: sanitizeHookDisplayText(hook.prompt),
+          }),
           ...('statusMessage' in hook &&
             hook.statusMessage != null && {
               statusMessage: hook.statusMessage,
@@ -2276,182 +2420,381 @@ async function* executeHooks({
   }
 
   // Run all hooks in parallel with individual timeouts
-  const hookPromises = matchingHooks.map(async function* (
-    { hook, pluginRoot, pluginId, skillRoot },
-    hookIndex,
-  ): AsyncGenerator<HookResult> {
-    if (hook.type === 'callback') {
-      const callbackTimeoutMs = hook.timeout ? hook.timeout * 1000 : timeoutMs
+  const rawHookPromises = matchingHooks.map(
+    async function* (matchedHook, hookIndex): AsyncGenerator<HookResult> {
+      const { hook, pluginRoot, pluginId, skillRoot } = matchedHook
+      const execution = hookExecutions[hookIndex]!
+      if (
+        !isInternalHook(matchedHook) &&
+        (hook.type === 'callback' ||
+          hook.type === 'function' ||
+          hook.type === 'prompt' ||
+          hook.type === 'agent')
+      ) {
+        emitHookStarted(execution.hookId, hookName, hookEvent, {
+          hookSource: execution.hookSource,
+          hookType: execution.hookType,
+          displayInput: execution.displayInput,
+        })
+      }
+
+      if (hook.type === 'callback') {
+        const callbackTimeoutMs = hook.timeout ? hook.timeout * 1000 : timeoutMs
+        const { signal: abortSignal, cleanup } = createCombinedAbortSignal(
+          signal,
+          { timeoutMs: callbackTimeoutMs },
+        )
+        yield executeHookCallback({
+          toolUseID,
+          hook,
+          hookEvent,
+          hookInput,
+          signal: abortSignal,
+          hookIndex,
+          toolUseContext,
+        }).finally(cleanup)
+        return
+      }
+
+      if (hook.type === 'function') {
+        if (!messages) {
+          yield {
+            message: createAttachmentMessage({
+              type: 'hook_error_during_execution',
+              hookName,
+              toolUseID,
+              hookEvent,
+              content: 'Messages not provided for function hook',
+            }),
+            outcome: 'non_blocking_error',
+            hook,
+          }
+          return
+        }
+
+        // Function hooks only come from session storage with callback embedded
+        yield executeFunctionHook({
+          hook,
+          messages,
+          hookName,
+          toolUseID,
+          hookEvent,
+          timeoutMs,
+          signal,
+        })
+        return
+      }
+
+      // Command and prompt hooks need jsonInput
+      const commandTimeoutMs = hook.timeout ? hook.timeout * 1000 : timeoutMs
       const { signal: abortSignal, cleanup } = createCombinedAbortSignal(
         signal,
-        { timeoutMs: callbackTimeoutMs },
+        {
+          timeoutMs: commandTimeoutMs,
+        },
       )
-      yield executeHookCallback({
-        toolUseID,
-        hook,
-        hookEvent,
-        hookInput,
-        signal: abortSignal,
-        hookIndex,
-        toolUseContext,
-      }).finally(cleanup)
-      return
-    }
+      const hookId = execution.hookId
+      const hookStartMs = execution.startMs
+      const hookCommand = execution.displayInput
 
-    if (hook.type === 'function') {
-      if (!messages) {
-        yield {
-          message: createAttachmentMessage({
-            type: 'hook_error_during_execution',
-            hookName,
-            toolUseID,
-            hookEvent,
-            content: 'Messages not provided for function hook',
-          }),
-          outcome: 'non_blocking_error',
-          hook,
+      try {
+        const jsonInputRes = getJsonInput()
+        if (!jsonInputRes.ok) {
+          yield {
+            message: createAttachmentMessage({
+              type: 'hook_error_during_execution',
+              hookName,
+              toolUseID,
+              hookEvent,
+              content: `Failed to prepare hook input: ${errorMessage((jsonInputRes as { ok: false; error: unknown }).error)}`,
+              command: hookCommand,
+              durationMs: Date.now() - hookStartMs,
+            }),
+            outcome: 'non_blocking_error',
+            hook,
+          }
+          cleanup()
+          return
         }
-        return
-      }
+        const jsonInput = jsonInputRes.value
 
-      // Function hooks only come from session storage with callback embedded
-      yield executeFunctionHook({
-        hook,
-        messages,
-        hookName,
-        toolUseID,
-        hookEvent,
-        timeoutMs,
-        signal,
-      })
-      return
-    }
-
-    // Command and prompt hooks need jsonInput
-    const commandTimeoutMs = hook.timeout ? hook.timeout * 1000 : timeoutMs
-    const { signal: abortSignal, cleanup } = createCombinedAbortSignal(signal, {
-      timeoutMs: commandTimeoutMs,
-    })
-    const hookId = randomUUID()
-    const hookStartMs = Date.now()
-    const hookCommand = getHookDisplayText(hook)
-
-    try {
-      const jsonInputRes = getJsonInput()
-      if (!jsonInputRes.ok) {
-        yield {
-          message: createAttachmentMessage({
-            type: 'hook_error_during_execution',
+        if (hook.type === 'prompt') {
+          if (!toolUseContext) {
+            throw new Error(
+              'ToolUseContext is required for prompt hooks. This is a bug.',
+            )
+          }
+          const promptResult = await execPromptHook(
+            hook,
             hookName,
-            toolUseID,
             hookEvent,
-            content: `Failed to prepare hook input: ${errorMessage((jsonInputRes as { ok: false; error: unknown }).error)}`,
-            command: hookCommand,
-            durationMs: Date.now() - hookStartMs,
-          }),
-          outcome: 'non_blocking_error',
-          hook,
-        }
-        cleanup()
-        return
-      }
-      const jsonInput = jsonInputRes.value
-
-      if (hook.type === 'prompt') {
-        if (!toolUseContext) {
-          throw new Error(
-            'ToolUseContext is required for prompt hooks. This is a bug.',
+            jsonInput,
+            abortSignal,
+            toolUseContext,
+            messages,
+            toolUseID,
           )
+          // Inject timing fields for hook visibility
+          if (promptResult.message?.type === 'attachment') {
+            const att = promptResult.message.attachment!
+            if (
+              att.type === 'hook_success' ||
+              att.type === 'hook_non_blocking_error'
+            ) {
+              att.command = hookCommand
+              att.durationMs = Date.now() - hookStartMs
+            }
+          }
+          yield promptResult
+          cleanup?.()
+          return
         }
-        const promptResult = await execPromptHook(
+
+        if (hook.type === 'agent') {
+          if (!toolUseContext) {
+            throw new Error(
+              'ToolUseContext is required for agent hooks. This is a bug.',
+            )
+          }
+          if (!messages) {
+            throw new Error(
+              'Messages are required for agent hooks. This is a bug.',
+            )
+          }
+          const agentResult = await execAgentHook(
+            hook,
+            hookName,
+            hookEvent,
+            jsonInput,
+            abortSignal,
+            toolUseContext,
+            toolUseID,
+            messages,
+            'agent_type' in hookInput
+              ? (hookInput.agent_type as string)
+              : undefined,
+          )
+          // Inject timing fields for hook visibility
+          if (agentResult.message?.type === 'attachment') {
+            const att = agentResult.message.attachment!
+            if (
+              att.type === 'hook_success' ||
+              att.type === 'hook_non_blocking_error'
+            ) {
+              att.command = hookCommand
+              att.durationMs = Date.now() - hookStartMs
+            }
+          }
+          yield agentResult
+          cleanup?.()
+          return
+        }
+
+        if (hook.type === 'http') {
+          emitHookStarted(hookId, hookName, hookEvent, {
+            hookSource: execution.hookSource,
+            hookType: execution.hookType,
+            displayInput: execution.displayInput,
+          })
+
+          // execHttpHook manages its own timeout internally via hook.timeout or
+          // DEFAULT_HTTP_HOOK_TIMEOUT_MS, so pass the parent signal directly
+          // to avoid double-stacking timeouts with abortSignal.
+          const httpResult = await execHttpHook(
+            hook,
+            hookEvent,
+            jsonInput,
+            signal,
+          )
+          cleanup?.()
+          execution.stdout = httpResult.body
+          execution.stderr = httpResult.error
+          execution.exitCode = httpResult.statusCode
+
+          if (httpResult.aborted) {
+            emitHookResponse({
+              hookId,
+              hookName,
+              hookEvent,
+              output: 'Hook cancelled',
+              stdout: '',
+              stderr: '',
+              exitCode: undefined,
+              outcome: 'cancelled',
+            })
+            yield {
+              message: createAttachmentMessage({
+                type: 'hook_cancelled',
+                hookName,
+                toolUseID,
+                hookEvent,
+              }),
+              outcome: 'cancelled' as const,
+              hook,
+            }
+            return
+          }
+
+          if (httpResult.error || !httpResult.ok) {
+            const stderr =
+              httpResult.error ||
+              `HTTP ${httpResult.statusCode} from ${hook.url}`
+            emitHookResponse({
+              hookId,
+              hookName,
+              hookEvent,
+              output: stderr,
+              stdout: '',
+              stderr,
+              exitCode: httpResult.statusCode,
+              outcome: 'error',
+            })
+            yield {
+              message: createAttachmentMessage({
+                type: 'hook_non_blocking_error',
+                hookName,
+                toolUseID,
+                hookEvent,
+                stderr,
+                stdout: '',
+                exitCode: httpResult.statusCode ?? 0,
+              }),
+              outcome: 'non_blocking_error' as const,
+              hook,
+            }
+            return
+          }
+
+          // HTTP hooks must return JSON — parse and validate through Zod
+          const { json: httpJson, validationError: httpValidationError } =
+            parseHttpHookOutput(httpResult.body)
+
+          if (httpValidationError) {
+            emitHookResponse({
+              hookId,
+              hookName,
+              hookEvent,
+              output: httpResult.body,
+              stdout: httpResult.body,
+              stderr: `JSON validation failed: ${httpValidationError}`,
+              exitCode: httpResult.statusCode,
+              outcome: 'error',
+            })
+            yield {
+              message: createAttachmentMessage({
+                type: 'hook_non_blocking_error',
+                hookName,
+                toolUseID,
+                hookEvent,
+                stderr: `JSON validation failed: ${httpValidationError}`,
+                stdout: httpResult.body,
+                exitCode: httpResult.statusCode ?? 0,
+              }),
+              outcome: 'non_blocking_error' as const,
+              hook,
+            }
+            return
+          }
+
+          if (httpJson && isSyncHookJSONOutput(httpJson)) {
+            execution.suppressOutput = httpJson.suppressOutput === true
+          }
+
+          if (httpJson && isAsyncHookJSONOutput(httpJson)) {
+            // Async response: treat as success (no further processing)
+            emitHookResponse({
+              hookId,
+              hookName,
+              hookEvent,
+              output: httpResult.body,
+              stdout: httpResult.body,
+              stderr: '',
+              exitCode: httpResult.statusCode,
+              outcome: 'success',
+            })
+            yield {
+              outcome: 'success' as const,
+              hook,
+            }
+            return
+          }
+
+          if (httpJson) {
+            const processed = processHookJSONOutput({
+              json: httpJson,
+              command: hook.url,
+              hookName,
+              toolUseID,
+              hookEvent,
+              expectedHookEvent: hookEvent,
+              stdout: httpResult.body,
+              stderr: '',
+              exitCode: httpResult.statusCode,
+            })
+            emitHookResponse({
+              hookId,
+              hookName,
+              hookEvent,
+              output: httpResult.body,
+              stdout: httpResult.body,
+              stderr: '',
+              exitCode: httpResult.statusCode,
+              outcome: 'success',
+            })
+            yield {
+              ...processed,
+              outcome: 'success' as const,
+              hook,
+            }
+            return
+          }
+
+          return
+        }
+
+        emitHookStarted(hookId, hookName, hookEvent, {
+          hookSource: execution.hookSource,
+          hookType: execution.hookType,
+          displayInput: execution.displayInput,
+        })
+
+        const result = await execCommandHook(
           hook,
-          hookName,
           hookEvent,
+          hookName,
           jsonInput,
           abortSignal,
-          toolUseContext,
-          messages,
-          toolUseID,
+          hookId,
+          hookIndex,
+          pluginRoot,
+          pluginId,
+          skillRoot,
+          forceSyncExecution,
+          boundRequestPrompt,
         )
-        // Inject timing fields for hook visibility
-        if (promptResult.message?.type === 'attachment') {
-          const att = promptResult.message.attachment!
-          if (
-            att.type === 'hook_success' ||
-            att.type === 'hook_non_blocking_error'
-          ) {
-            att.command = hookCommand
-            att.durationMs = Date.now() - hookStartMs
+        cleanup?.()
+        const durationMs = Date.now() - hookStartMs
+        execution.stdout = result.stdout
+        execution.stderr = result.stderr
+        execution.exitCode = result.status
+
+        if (result.backgrounded) {
+          yield {
+            outcome: 'success' as const,
+            hook,
           }
+          return
         }
-        yield promptResult
-        cleanup?.()
-        return
-      }
 
-      if (hook.type === 'agent') {
-        if (!toolUseContext) {
-          throw new Error(
-            'ToolUseContext is required for agent hooks. This is a bug.',
-          )
-        }
-        if (!messages) {
-          throw new Error(
-            'Messages are required for agent hooks. This is a bug.',
-          )
-        }
-        const agentResult = await execAgentHook(
-          hook,
-          hookName,
-          hookEvent,
-          jsonInput,
-          abortSignal,
-          toolUseContext,
-          toolUseID,
-          messages,
-          'agent_type' in hookInput
-            ? (hookInput.agent_type as string)
-            : undefined,
-        )
-        // Inject timing fields for hook visibility
-        if (agentResult.message?.type === 'attachment') {
-          const att = agentResult.message.attachment!
-          if (
-            att.type === 'hook_success' ||
-            att.type === 'hook_non_blocking_error'
-          ) {
-            att.command = hookCommand
-            att.durationMs = Date.now() - hookStartMs
-          }
-        }
-        yield agentResult
-        cleanup?.()
-        return
-      }
-
-      if (hook.type === 'http') {
-        emitHookStarted(hookId, hookName, hookEvent)
-
-        // execHttpHook manages its own timeout internally via hook.timeout or
-        // DEFAULT_HTTP_HOOK_TIMEOUT_MS, so pass the parent signal directly
-        // to avoid double-stacking timeouts with abortSignal.
-        const httpResult = await execHttpHook(
-          hook,
-          hookEvent,
-          jsonInput,
-          signal,
-        )
-        cleanup?.()
-
-        if (httpResult.aborted) {
+        if (result.aborted) {
           emitHookResponse({
             hookId,
             hookName,
             hookEvent,
-            output: 'Hook cancelled',
-            stdout: '',
-            stderr: '',
-            exitCode: undefined,
+            output: result.output,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.status,
             outcome: 'cancelled',
           })
           yield {
@@ -2460,6 +2803,8 @@ async function* executeHooks({
               hookName,
               toolUseID,
               hookEvent,
+              command: hookCommand,
+              durationMs,
             }),
             outcome: 'cancelled' as const,
             hook,
@@ -2467,17 +2812,20 @@ async function* executeHooks({
           return
         }
 
-        if (httpResult.error || !httpResult.ok) {
-          const stderr =
-            httpResult.error || `HTTP ${httpResult.statusCode} from ${hook.url}`
+        // Try JSON parsing first
+        const { json, plainText, validationError } = parseHookOutput(
+          result.stdout,
+        )
+
+        if (validationError) {
           emitHookResponse({
             hookId,
             hookName,
             hookEvent,
-            output: stderr,
-            stdout: '',
-            stderr,
-            exitCode: httpResult.statusCode,
+            output: result.output,
+            stdout: result.stdout,
+            stderr: `JSON validation failed: ${validationError}`,
+            exitCode: 1,
             outcome: 'error',
           })
           yield {
@@ -2486,9 +2834,11 @@ async function* executeHooks({
               hookName,
               toolUseID,
               hookEvent,
-              stderr,
-              stdout: '',
-              exitCode: httpResult.statusCode ?? 0,
+              stderr: `JSON validation failed: ${validationError}`,
+              stdout: result.stdout,
+              exitCode: 1,
+              command: hookCommand,
+              durationMs,
             }),
             outcome: 'non_blocking_error' as const,
             hook,
@@ -2496,210 +2846,97 @@ async function* executeHooks({
           return
         }
 
-        // HTTP hooks must return JSON — parse and validate through Zod
-        const { json: httpJson, validationError: httpValidationError } =
-          parseHttpHookOutput(httpResult.body)
-
-        if (httpValidationError) {
-          emitHookResponse({
-            hookId,
-            hookName,
-            hookEvent,
-            output: httpResult.body,
-            stdout: httpResult.body,
-            stderr: `JSON validation failed: ${httpValidationError}`,
-            exitCode: httpResult.statusCode,
-            outcome: 'error',
-          })
-          yield {
-            message: createAttachmentMessage({
-              type: 'hook_non_blocking_error',
-              hookName,
-              toolUseID,
-              hookEvent,
-              stderr: `JSON validation failed: ${httpValidationError}`,
-              stdout: httpResult.body,
-              exitCode: httpResult.statusCode ?? 0,
-            }),
-            outcome: 'non_blocking_error' as const,
-            hook,
+        if (json) {
+          // Async responses were already backgrounded during execution
+          if (isAsyncHookJSONOutput(json)) {
+            yield {
+              outcome: 'success' as const,
+              hook,
+            }
+            return
           }
-          return
-        }
 
-        if (httpJson && isAsyncHookJSONOutput(httpJson)) {
-          // Async response: treat as success (no further processing)
-          emitHookResponse({
-            hookId,
-            hookName,
-            hookEvent,
-            output: httpResult.body,
-            stdout: httpResult.body,
-            stderr: '',
-            exitCode: httpResult.statusCode,
-            outcome: 'success',
-          })
-          yield {
-            outcome: 'success' as const,
-            hook,
-          }
-          return
-        }
-
-        if (httpJson) {
+          // Process JSON output
           const processed = processHookJSONOutput({
-            json: httpJson,
-            command: hook.url,
+            json,
+            command: hookCommand,
             hookName,
             toolUseID,
             hookEvent,
             expectedHookEvent: hookEvent,
-            stdout: httpResult.body,
-            stderr: '',
-            exitCode: httpResult.statusCode,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.status,
+            durationMs,
           })
+
+          // Handle suppressOutput (skip for async responses)
+          const syncJson = json as TypedSyncHookOutput
+          execution.suppressOutput =
+            isSyncHookJSONOutput(json) && syncJson.suppressOutput === true
+          if (
+            isSyncHookJSONOutput(json) &&
+            !syncJson.suppressOutput &&
+            plainText &&
+            result.status === 0
+          ) {
+            // Still show non-JSON output if not suppressed
+            const content = `${chalk.bold(hookName)} completed`
+            emitHookResponse({
+              hookId,
+              hookName,
+              hookEvent,
+              output: result.output,
+              stdout: result.stdout,
+              stderr: result.stderr,
+              exitCode: result.status,
+              outcome: 'success',
+            })
+            yield {
+              ...processed,
+              message:
+                processed.message ||
+                createAttachmentMessage({
+                  type: 'hook_success',
+                  hookName,
+                  toolUseID,
+                  hookEvent,
+                  content,
+                  stdout: result.stdout,
+                  stderr: result.stderr,
+                  exitCode: result.status,
+                  command: hookCommand,
+                  durationMs,
+                }),
+              outcome: 'success' as const,
+              hook,
+            }
+            return
+          }
+
           emitHookResponse({
             hookId,
             hookName,
             hookEvent,
-            output: httpResult.body,
-            stdout: httpResult.body,
-            stderr: '',
-            exitCode: httpResult.statusCode,
-            outcome: 'success',
+            output: result.output,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.status,
+            outcome: result.status === 0 ? 'success' : 'error',
           })
           yield {
             ...processed,
-            outcome: 'success' as const,
+            outcome:
+              result.status === 0
+                ? ('success' as const)
+                : ('non_blocking_error' as const),
             hook,
           }
           return
         }
 
-        return
-      }
-
-      emitHookStarted(hookId, hookName, hookEvent)
-
-      const result = await execCommandHook(
-        hook,
-        hookEvent,
-        hookName,
-        jsonInput,
-        abortSignal,
-        hookId,
-        hookIndex,
-        pluginRoot,
-        pluginId,
-        skillRoot,
-        forceSyncExecution,
-        boundRequestPrompt,
-      )
-      cleanup?.()
-      const durationMs = Date.now() - hookStartMs
-
-      if (result.backgrounded) {
-        yield {
-          outcome: 'success' as const,
-          hook,
-        }
-        return
-      }
-
-      if (result.aborted) {
-        emitHookResponse({
-          hookId,
-          hookName,
-          hookEvent,
-          output: result.output,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.status,
-          outcome: 'cancelled',
-        })
-        yield {
-          message: createAttachmentMessage({
-            type: 'hook_cancelled',
-            hookName,
-            toolUseID,
-            hookEvent,
-            command: hookCommand,
-            durationMs,
-          }),
-          outcome: 'cancelled' as const,
-          hook,
-        }
-        return
-      }
-
-      // Try JSON parsing first
-      const { json, plainText, validationError } = parseHookOutput(
-        result.stdout,
-      )
-
-      if (validationError) {
-        emitHookResponse({
-          hookId,
-          hookName,
-          hookEvent,
-          output: result.output,
-          stdout: result.stdout,
-          stderr: `JSON validation failed: ${validationError}`,
-          exitCode: 1,
-          outcome: 'error',
-        })
-        yield {
-          message: createAttachmentMessage({
-            type: 'hook_non_blocking_error',
-            hookName,
-            toolUseID,
-            hookEvent,
-            stderr: `JSON validation failed: ${validationError}`,
-            stdout: result.stdout,
-            exitCode: 1,
-            command: hookCommand,
-            durationMs,
-          }),
-          outcome: 'non_blocking_error' as const,
-          hook,
-        }
-        return
-      }
-
-      if (json) {
-        // Async responses were already backgrounded during execution
-        if (isAsyncHookJSONOutput(json)) {
-          yield {
-            outcome: 'success' as const,
-            hook,
-          }
-          return
-        }
-
-        // Process JSON output
-        const processed = processHookJSONOutput({
-          json,
-          command: hookCommand,
-          hookName,
-          toolUseID,
-          hookEvent,
-          expectedHookEvent: hookEvent,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.status,
-          durationMs,
-        })
-
-        // Handle suppressOutput (skip for async responses)
-        const syncJson = json as TypedSyncHookOutput
-        if (
-          isSyncHookJSONOutput(json) &&
-          !syncJson.suppressOutput &&
-          plainText &&
-          result.status === 0
-        ) {
-          // Still show non-JSON output if not suppressed
-          const content = `${chalk.bold(hookName)} completed`
+        // Fall back to existing logic for non-JSON output
+        if (result.status === 0) {
           emitHookResponse({
             hookId,
             hookName,
@@ -2711,78 +2948,49 @@ async function* executeHooks({
             outcome: 'success',
           })
           yield {
-            ...processed,
-            message:
-              processed.message ||
-              createAttachmentMessage({
-                type: 'hook_success',
-                hookName,
-                toolUseID,
-                hookEvent,
-                content,
-                stdout: result.stdout,
-                stderr: result.stderr,
-                exitCode: result.status,
-                command: hookCommand,
-                durationMs,
-              }),
+            message: createAttachmentMessage({
+              type: 'hook_success',
+              hookName,
+              toolUseID,
+              hookEvent,
+              content: result.stdout.trim(),
+              stdout: result.stdout,
+              stderr: result.stderr,
+              exitCode: result.status,
+              command: hookCommand,
+              durationMs,
+            }),
             outcome: 'success' as const,
             hook,
           }
           return
         }
 
-        emitHookResponse({
-          hookId,
-          hookName,
-          hookEvent,
-          output: result.output,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.status,
-          outcome: result.status === 0 ? 'success' : 'error',
-        })
-        yield {
-          ...processed,
-          outcome: 'success' as const,
-          hook,
-        }
-        return
-      }
-
-      // Fall back to existing logic for non-JSON output
-      if (result.status === 0) {
-        emitHookResponse({
-          hookId,
-          hookName,
-          hookEvent,
-          output: result.output,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.status,
-          outcome: 'success',
-        })
-        yield {
-          message: createAttachmentMessage({
-            type: 'hook_success',
+        // Hooks with exit code 2 provide blocking feedback
+        if (result.status === 2) {
+          emitHookResponse({
+            hookId,
             hookName,
-            toolUseID,
             hookEvent,
-            content: result.stdout.trim(),
+            output: result.output,
             stdout: result.stdout,
             stderr: result.stderr,
             exitCode: result.status,
-            command: hookCommand,
-            durationMs,
-          }),
-          outcome: 'success' as const,
-          hook,
+            outcome: 'error',
+          })
+          yield {
+            blockingError: {
+              blockingError: `[${hook.command}]: ${result.stderr || 'No stderr output'}`,
+              command: hook.command,
+            },
+            outcome: 'blocking' as const,
+            hook,
+          }
+          return
         }
-        return
-      }
 
-      // Hooks with exit code 2 provide blocking feedback
-      if (result.status === 2) {
+        // Any other non-zero exit code is a non-critical error that should just
+        // be shown to the user.
         emitHookResponse({
           hookId,
           hookName,
@@ -2794,78 +3002,96 @@ async function* executeHooks({
           outcome: 'error',
         })
         yield {
-          blockingError: {
-            blockingError: `[${hook.command}]: ${result.stderr || 'No stderr output'}`,
-            command: hook.command,
-          },
-          outcome: 'blocking' as const,
+          message: createAttachmentMessage({
+            type: 'hook_non_blocking_error',
+            hookName,
+            toolUseID,
+            hookEvent,
+            stderr: `Failed with non-blocking status code: ${result.stderr.trim() || 'No stderr output'}`,
+            stdout: result.stdout,
+            exitCode: result.status,
+            command: hookCommand,
+            durationMs,
+          }),
+          outcome: 'non_blocking_error' as const,
+          hook,
+        }
+        return
+      } catch (error) {
+        // Clean up on error
+        cleanup?.()
+
+        const errorMessage =
+          error instanceof Error ? error.message : String(error)
+        if (hook.type === 'command' || hook.type === 'http') {
+          emitHookResponse({
+            hookId,
+            hookName,
+            hookEvent,
+            output: `Failed to run: ${errorMessage}`,
+            stdout: '',
+            stderr: `Failed to run: ${errorMessage}`,
+            exitCode: 1,
+            outcome: 'error',
+          })
+        }
+        yield {
+          message: createAttachmentMessage({
+            type: 'hook_non_blocking_error',
+            hookName,
+            toolUseID,
+            hookEvent,
+            stderr: `Failed to run: ${errorMessage}`,
+            stdout: '',
+            exitCode: 1,
+            command: hookCommand,
+            durationMs: Date.now() - hookStartMs,
+          }),
+          outcome: 'non_blocking_error' as const,
           hook,
         }
         return
       }
+    },
+  )
 
-      // Any other non-zero exit code is a non-critical error that should just
-      // be shown to the user.
-      emitHookResponse({
-        hookId,
-        hookName,
-        hookEvent,
-        output: result.output,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exitCode: result.status,
-        outcome: 'error',
-      })
-      yield {
-        message: createAttachmentMessage({
-          type: 'hook_non_blocking_error',
-          hookName,
-          toolUseID,
-          hookEvent,
-          stderr: `Failed with non-blocking status code: ${result.stderr.trim() || 'No stderr output'}`,
-          stdout: result.stdout,
-          exitCode: result.status,
-          command: hookCommand,
-          durationMs,
-        }),
-        outcome: 'non_blocking_error' as const,
-        hook,
+  const hookPromises = rawHookPromises.map((generator, hookIndex) =>
+    (async function* () {
+      const matchedHook = matchingHooks[hookIndex]!
+      const execution = hookExecutions[hookIndex]!
+      const emitsWrappedLifecycle =
+        !isInternalHook(matchedHook) &&
+        (matchedHook.hook.type === 'callback' ||
+          matchedHook.hook.type === 'function' ||
+          matchedHook.hook.type === 'prompt' ||
+          matchedHook.hook.type === 'agent')
+      try {
+        for await (const result of generator) {
+          if (emitsWrappedLifecycle) {
+            emitHookResultResponse(execution, hookName, hookEvent, result)
+          }
+          yield { result, execution }
+        }
+      } catch (error) {
+        if (emitsWrappedLifecycle) {
+          const message = error instanceof Error ? error.message : String(error)
+          execution.stderr = `Failed to run: ${message}`
+          execution.exitCode = 1
+          emitHookResponse({
+            hookId: execution.hookId,
+            hookName,
+            hookEvent,
+            output: execution.stderr,
+            stdout: '',
+            stderr: execution.stderr,
+            exitCode: 1,
+            outcome: 'error',
+          })
+        }
+        throw error
       }
-      return
-    } catch (error) {
-      // Clean up on error
-      cleanup?.()
-
-      const errorMessage =
-        error instanceof Error ? error.message : String(error)
-      emitHookResponse({
-        hookId,
-        hookName,
-        hookEvent,
-        output: `Failed to run: ${errorMessage}`,
-        stdout: '',
-        stderr: `Failed to run: ${errorMessage}`,
-        exitCode: 1,
-        outcome: 'error',
-      })
-      yield {
-        message: createAttachmentMessage({
-          type: 'hook_non_blocking_error',
-          hookName,
-          toolUseID,
-          hookEvent,
-          stderr: `Failed to run: ${errorMessage}`,
-          stdout: '',
-          exitCode: 1,
-          command: hookCommand,
-          durationMs: Date.now() - hookStartMs,
-        }),
-        outcome: 'non_blocking_error' as const,
-        hook,
-      }
-      return
-    }
-  })
+    })(),
+  )
 
   // Track outcomes for logging
   const outcomes = {
@@ -2878,8 +3104,38 @@ async function* executeHooks({
   let permissionBehavior: PermissionResult['behavior'] | undefined
 
   // Run all hooks in parallel and wait for all to complete
-  for await (const result of all(hookPromises)) {
+  for await (const { result, execution } of all(hookPromises)) {
     outcomes[result.outcome]++
+
+    if (!(result.hook.type === 'callback' && result.hook.internal === true)) {
+      updateHookExecutionFromResult(execution, result)
+
+      yield {
+        message: createAttachmentMessage({
+          type: 'hook_execution',
+          hookId: execution.hookId,
+          hookName,
+          toolUseID,
+          hookEvent,
+          hookSource: execution.hookSource,
+          hookType: execution.hookType,
+          outcome:
+            result.outcome === 'non_blocking_error' ? 'error' : result.outcome,
+          durationMs: Date.now() - execution.startMs,
+          displayInput: execution.displayInput,
+          ...(!execution.suppressOutput && {
+            stdout: execution.stdout
+              ? sanitizeHookDisplayText(execution.stdout, 4000)
+              : undefined,
+            stderr: execution.stderr
+              ? sanitizeHookDisplayText(execution.stderr, 4000)
+              : undefined,
+          }),
+          exitCode: execution.exitCode,
+          suppressOutput: execution.suppressOutput,
+        }),
+      }
+    }
 
     // Check for preventContinuation early
     if (result.preventContinuation) {
@@ -2900,7 +3156,19 @@ async function* executeHooks({
     }
 
     if (result.message) {
-      yield { message: result.message }
+      const attachmentType =
+        result.message.type === 'attachment'
+          ? result.message.attachment?.type
+          : undefined
+      if (
+        attachmentType !== 'hook_success' &&
+        attachmentType !== 'hook_non_blocking_error' &&
+        attachmentType !== 'hook_error_during_execution' &&
+        attachmentType !== 'hook_cancelled' &&
+        attachmentType !== 'hook_blocking_error'
+      ) {
+        yield { message: result.message }
+      }
     }
 
     // Yield system message separately if present
@@ -4782,6 +5050,17 @@ export async function executeStatusLineCommand(
     return undefined
   }
 
+  const policyMatch = findBlockedMacosHook(statusLine, {
+    source: shouldAllowManagedHooksOnly() ? 'policySettings' : 'settings',
+  })
+  if (policyMatch) {
+    logForDebugging(
+      `Skipping StatusLine command ${formatInjectionPolicyRejection(policyMatch)}`,
+      { level: 'warn' },
+    )
+    return undefined
+  }
+
   // Use provided signal or create a default one
   const abortSignal = signal || AbortSignal.timeout(timeoutMs)
 
@@ -4869,6 +5148,17 @@ export async function executeFileSuggestionCommand(
   }
 
   if (!fileSuggestion || fileSuggestion.type !== 'command') {
+    return []
+  }
+
+  const policyMatch = findBlockedMacosHook(fileSuggestion, {
+    source: shouldAllowManagedHooksOnly() ? 'policySettings' : 'settings',
+  })
+  if (policyMatch) {
+    logForDebugging(
+      `Skipping FileSuggestion command ${formatInjectionPolicyRejection(policyMatch)}`,
+      { level: 'warn' },
+    )
     return []
   }
 

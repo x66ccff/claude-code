@@ -8,7 +8,7 @@ import type { VerificationStatus } from '../../hooks/useApiKeyVerification.js';
 import type { IDESelection } from '../../hooks/useIdeSelection.js';
 import { useSettings } from '../../hooks/useSettings.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import { Box, Text, useInput } from '@anthropic/ink';
+import { Box, stringWidth, Text, useInput } from '@anthropic/ink';
 import type { MCPServerConnection } from '../../services/mcp/types.js';
 import { useRegisterOverlay } from '../../context/overlayContext.js';
 import { useAppState, useSetAppState } from '../../state/AppState.js';
@@ -16,7 +16,12 @@ import type { ToolPermissionContext } from '../../Tool.js';
 import type { Message } from '../../types/message.js';
 import type { PromptInputMode, VimMode } from '../../types/textInputTypes.js';
 import type { AutoUpdaterResult } from '../../utils/autoUpdater.js';
-import { isFullscreenEnvEnabled } from '../../utils/fullscreen.js';
+import {
+  isFullscreenActive,
+  isFullscreenEnvEnabled,
+  isMouseClicksDisabled,
+  isMouseTrackingEnabled,
+} from '../../utils/fullscreen.js';
 import { getPipeDisplayRole, isPipeControlled } from '../../utils/pipeTransport.js';
 import { isUndercover } from '../../utils/undercover.js';
 import { CoordinatorTaskPanel, useCoordinatorTaskCount } from '../CoordinatorAgentStatus.js';
@@ -64,7 +69,25 @@ type Props = {
   setHistoryQuery: (query: string) => void;
   historyFailedMatch: boolean;
   onOpenTasksDialog?: (taskId?: string) => void;
+  /** Click-to-send quick phrase pills (shown on wide terminals, right of input). */
+  onQuickPhrase?: (phrase: string) => void;
 };
+
+// --- Click-to-send quick phrases (right side of the footer row) ---
+// Two fixed phrases the user can click to send directly. Only shown when the
+// terminal is wide enough that they sit beside the representative left-side
+// status content without truncating it.
+const QUICK_PHRASES = ['现在呢？', '持续推进'] as const;
+// Representative max width of the left footer content, e.g.
+// " ⏵⏵ bypass on (shift+tab to cycle) · 159.8MB · pid:42853".
+const QUICK_PHRASE_REF_LEFT = ' ⏵⏵ bypass on (shift+tab to cycle) · 159.8MB · pid:42853';
+// Min columns = left status + pills + inter-pill gaps + left/right gap + paddingX(2+2).
+const QUICK_PHRASES_MIN_COLUMNS =
+  stringWidth(QUICK_PHRASE_REF_LEFT) +
+  QUICK_PHRASES.reduce((sum, p) => sum + stringWidth(p), 0) +
+  (QUICK_PHRASES.length - 1) +
+  1 +
+  4;
 
 function PromptInputFooter({
   apiKeyStatus,
@@ -99,6 +122,7 @@ function PromptInputFooter({
   setHistoryQuery,
   historyFailedMatch,
   onOpenTasksDialog,
+  onQuickPhrase,
 }: Props): ReactNode {
   const settings = useSettings();
   const { columns, rows } = useTerminalSize();
@@ -123,6 +147,20 @@ function PromptInputFooter({
 
   // Hide `? for shortcuts` if the user has a custom status line, or during ctrl-r
   const suppressHint = suppressHintFromProps || statusLineShouldDisplay(settings) || isSearching;
+  // Quick phrases are click-to-send, so only surface them when mouse clicks are
+  // actually wired up (fullscreen alt-screen + mouse tracking, not opted out),
+  // the terminal is wide enough to fit them beside the left status, and we're in
+  // a plain prompt state (not exiting / pasting / searching history).
+  const mouseClickable = isFullscreenActive() && isMouseTrackingEnabled() && !isMouseClicksDisabled();
+  const showQuickPhrases =
+    !!onQuickPhrase &&
+    mouseClickable &&
+    mode === 'prompt' &&
+    !isNarrow &&
+    columns >= QUICK_PHRASES_MIN_COLUMNS &&
+    !exitMessage.show &&
+    !isPasting &&
+    !isSearching;
   // Fullscreen: portal data to FullscreenLayout — see promptOverlayContext.tsx
   const overlayData = useMemo(
     () => (isFullscreen && suggestions.length ? { suggestions, selectedSuggestion, maxColumnWidth } : null),
@@ -179,6 +217,7 @@ function PromptInputFooter({
           />
         </Box>
         <Box flexShrink={1} gap={1}>
+          {showQuickPhrases && onQuickPhrase && <QuickPhrases onQuickPhrase={onQuickPhrase} />}
           {isFullscreen ? null : (
             <Notifications
               apiKeyStatus={apiKeyStatus}
@@ -205,6 +244,28 @@ function PromptInputFooter({
 }
 
 export default memo(PromptInputFooter);
+
+/** Click-to-send quick phrase pills. Rendered on the right side of the footer. */
+function QuickPhrases({ onQuickPhrase }: { onQuickPhrase: (phrase: string) => void }): React.ReactNode {
+  return (
+    <>
+      {QUICK_PHRASES.map(phrase => (
+        <QuickPhrasePill key={phrase} phrase={phrase} onClick={() => onQuickPhrase(phrase)} />
+      ))}
+    </>
+  );
+}
+
+function QuickPhrasePill({ phrase, onClick }: { phrase: string; onClick: () => void }): React.ReactNode {
+  const [hover, setHover] = useState(false);
+  return (
+    <Box flexShrink={0} onClick={onClick} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+      <Text color="background" inverse={hover}>
+        {phrase}
+      </Text>
+    </Box>
+  );
+}
 
 type BridgeStatusProps = {
   bridgeSelected: boolean;

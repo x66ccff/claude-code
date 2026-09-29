@@ -32,6 +32,7 @@ import {
 import { type SettingsJson, SettingsSchema } from '../types.js'
 import {
   filterInvalidPermissionRules,
+  filterUnknownHookEvents,
   formatZodError,
   type ValidationError,
 } from '../validation.js'
@@ -190,6 +191,10 @@ export function parseCommandOutputAsSettings(
   }
 
   const ruleWarnings = filterInvalidPermissionRules(data, sourcePath)
+  // Strip hook events unknown to this build so one newer event name doesn't
+  // reject the entire managed settings payload. Silent (debug-level concern,
+  // not a user-fixable error) — see filterUnknownHookEvents.
+  filterUnknownHookEvents(data, sourcePath)
   const parseResult = SettingsSchema().safeParse(data)
   if (!parseResult.success) {
     const errors = formatZodError(parseResult.error, sourcePath)

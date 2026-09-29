@@ -9,7 +9,7 @@ import { LogSelector } from '../components/LogSelector.js';
 import { Spinner } from '../components/Spinner.js';
 import { restoreCostStateForSession } from '../cost-tracker.js';
 import { setClipboard } from '@anthropic/ink';
-import { Box, Text } from '@anthropic/ink';
+import { Box, Text, useInput } from '@anthropic/ink';
 import { useKeybinding } from '../keybindings/useKeybinding.js';
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -211,6 +211,21 @@ export function ResumeConversation({
     process.exit(1);
   }
 
+  // [ccb mod] Ctrl-C / q must abort the loading & resuming spinners too.
+  // Session dirs can live on slow network mounts (ossfs/CPFS), where the
+  // stat + head/tail reads for dozens of transcripts take minutes — before
+  // this, neither spinner had any key handler, so `ccb -r` was unstuck only
+  // by killing the terminal. The scan itself is fully async, so the event
+  // loop stays responsive and these keys fire between file reads.
+  useInput(
+    (input, key) => {
+      if ((key.ctrl && input === 'c') || input === 'q' || input === 'Q') {
+        onCancel();
+      }
+    },
+    { isActive: loading || resuming },
+  );
+
   async function onSelect(log: LogOption) {
     setResuming(true);
     const resumeStart = performance.now();
@@ -373,6 +388,7 @@ export function ResumeConversation({
       <Box>
         <Spinner />
         <Text> Loading conversations…</Text>
+        <Text dimColor> (q or Ctrl-C to quit)</Text>
       </Box>
     );
   }
@@ -382,6 +398,7 @@ export function ResumeConversation({
       <Box>
         <Spinner />
         <Text> Resuming conversation…</Text>
+        <Text dimColor> (q or Ctrl-C to quit)</Text>
       </Box>
     );
   }

@@ -180,14 +180,14 @@ export function AssistantTextMessage({
           width="100%"
           backgroundColor={isSelected ? 'messageActionsBackground' : undefined}
         >
-          <Box flexDirection="row">
+          <Box flexDirection="row" width="100%">
             {shouldShowDot && (
               <NoSelect fromLeftEdge minWidth={2}>
                 <Text color={isSelected ? 'suggestion' : 'text'}>{BLACK_CIRCLE}</Text>
               </NoSelect>
             )}
-            <Box flexDirection="column">
-              <Markdown>{text}</Markdown>
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+              <Markdown copyable>{text}</Markdown>
             </Box>
           </Box>
         </Box>

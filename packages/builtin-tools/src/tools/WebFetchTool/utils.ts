@@ -14,6 +14,7 @@ import {
 } from 'src/utils/mcpOutputStorage.js'
 import { getSettings_DEPRECATED } from 'src/utils/settings/settings.js'
 import { asSystemPrompt } from 'src/utils/systemPromptType.js'
+import { assertTavilyUsable, resolveTavilyUrl } from '../shared/tavily.js'
 import { isPreapprovedHost } from './preapproved.js'
 import { makeSecondaryModelPrompt } from './prompt.js'
 import {
@@ -22,8 +23,6 @@ import {
   resetWebFetchProxyClient,
   WebFetchProxyError,
 } from './webFetchProxy.js'
-
-const DEFAULT_TAVILY_EXTRACT_URL = 'https://tavily.claude-code-best.win/extract'
 
 class DomainBlockedError extends Error {
   constructor(domain: string) {
@@ -567,16 +566,11 @@ export async function fetchContentWithTavily(
 
   const abortSignal = abortController.signal
 
-  const settings = getSettings_DEPRECATED() as Record<string, unknown> & {
-    tavilyEndpointUrl?: string
-  }
-  const baseUrl = settings.tavilyEndpointUrl || DEFAULT_TAVILY_EXTRACT_URL
-  // Derive extract URL from the base Tavily endpoint
-  const extractUrl = baseUrl.endsWith('/search')
-    ? baseUrl.replace(/\/search$/, '/extract')
-    : baseUrl.endsWith('/extract')
-      ? baseUrl
-      : `${baseUrl.replace(/\/$/, '')}/extract`
+  // No built-in third-party relay: use an explicitly configured endpoint,
+  // otherwise the official Tavily API (which requires the user's own key).
+  const resolved = resolveTavilyUrl('extract')
+  assertTavilyUsable(resolved)
+  const { url: extractUrl, apiKey } = resolved
 
   let response: AxiosResponse<{ url: string; raw_content: string }>
   try {
@@ -591,7 +585,10 @@ export async function fetchContentWithTavily(
       {
         signal: abortSignal,
         timeout: getFetchTimeoutMs(),
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        },
       },
     )
   } catch (error) {

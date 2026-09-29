@@ -379,7 +379,7 @@ export function Feedback({
             <Text>
               - Environment info:{' '}
               <Text dimColor>
-                {env.platform}, {env.terminal}, v{MACRO.VERSION}
+                {env.platform}, {env.terminal}, v{MACRO.BUILD_VERSION}
               </Text>
             </Text>
             {envInfo.gitState && (
@@ -448,7 +448,7 @@ export function createGitHubIssueUrl(
     `**Environment Info**\n` +
     `- Platform: ${env.platform}\n` +
     `- Terminal: ${env.terminal}\n` +
-    `- Version: ${MACRO.VERSION || 'unknown'}\n` +
+    `- Version: ${MACRO.BUILD_VERSION || 'unknown'}\n` +
     `- Feedback ID: ${feedbackId}\n` +
     `\n**Errors**\n\`\`\`json\n`;
   const errorSuffix = `\n\`\`\`\n`;

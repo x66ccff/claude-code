@@ -41,7 +41,10 @@ import { sequential } from '../../utils/sequential.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
 import { getTokenUsage, tokenCountWithEstimation } from '../../utils/tokens.js'
 import { logEvent } from '../analytics/index.js'
-import { isAutoCompactEnabled } from '../compact/autoCompact.js'
+import {
+  isAutoCompactEnabled,
+  isNearAutoCompactThreshold,
+} from '../compact/autoCompact.js'
 import {
   buildSessionMemoryUpdatePrompt,
   loadSessionMemoryTemplate,
@@ -285,6 +288,16 @@ const extractSessionMemory = sequential(async function (
   if (feature('POOR')) {
     const { isPoorModeActive } = await import('../../commands/poor/poorMode.js')
     if (isPoorModeActive()) return
+  }
+
+  // Near the autocompact threshold: defer. This fork carries the full
+  // conversation history; close to the threshold it is slow and would still
+  // be in flight when the next turn's compact request fires (two concurrent
+  // large API requests). Compaction supersedes this history anyway.
+  if (
+    isNearAutoCompactThreshold(messages, toolUseContext.options.mainLoopModel)
+  ) {
+    return
   }
 
   // Check gate lazily when hook runs (cached, non-blocking)

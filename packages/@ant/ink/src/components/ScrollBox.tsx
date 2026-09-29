@@ -189,9 +189,11 @@ function ScrollBox({ children, ref, stickyScroll, ...style }: PropsWithChildren<
       },
       setClampBounds(min, max) {
         const el = domRef.current;
-        if (!el) return;
+        if (!el || (el.scrollClampMin === min && el.scrollClampMax === max)) return;
         el.scrollClampMin = min;
         el.scrollClampMax = max;
+        // Layout effects can release the clamp after the previous frame was painted.
+        scrollMutated(el);
       },
     }),
     // notify/scrollMutated are inline (no useCallback) but only close over

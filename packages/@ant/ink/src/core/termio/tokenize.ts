@@ -178,6 +178,20 @@ function tokenize(
           seqStart = i
           result.state = 'escape'
           i++
+        } else if (code > 0x7e) {
+          // Non-ASCII char right after a pending ESC. No terminal protocol
+          // encodes Alt+CJK as ESC+char — legacy meta encoding, SS3, CSI u
+          // and modifyOtherKeys are all ASCII-range — and macOS Option+<non-
+          // ascii> doesn't produce it either. This adjacency only happens
+          // when a lone/split ESC (multiplexer focus forwarding, chunk
+          // boundary during a heavy render) is followed by a real keystroke
+          // inside the 50ms flush window. Gluing them makes parseKeypress
+          // report meta+char, which text input silently drops (its meta
+          // handler only maps b/f/d/y) — the classic "first CJK char of a
+          // sentence swallowed" pattern. Drop the stale ESC, reprocess the
+          // char from ground as plain text.
+          result.state = 'ground'
+          textStart = i
         } else {
           // Invalid - treat ESC as text
           result.state = 'ground'

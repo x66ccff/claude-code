@@ -65,7 +65,13 @@ import {
   startSelection,
   updateSelection,
 } from './selection.js';
-import { SYNC_OUTPUT_SUPPORTED, supportsExtendedKeys, type Terminal, writeDiffToTerminal } from './terminal.js';
+import {
+  DECSTBM_SAFE,
+  SYNC_OUTPUT_SUPPORTED,
+  supportsExtendedKeys,
+  type Terminal,
+  writeDiffToTerminal,
+} from './terminal.js';
 import {
   CURSOR_HOME,
   cursorMove,
@@ -93,6 +99,7 @@ import {
   wrapForMultiplexer,
 } from './termio/osc.js';
 import { TerminalWriteProvider } from '../hooks/useTerminalNotification.js';
+import { effectiveColumns } from './legacyConsole.js';
 
 // Alt-screen: renderer.ts sets cursor.visible = !isTTY || screen.height===0,
 // which is always false in alt-screen (TTY + content fills screen).
@@ -247,7 +254,7 @@ export default class Ink {
       stderr: options.stderr,
     };
 
-    this.terminalColumns = options.stdout.columns || 80;
+    this.terminalColumns = effectiveColumns(options.stdout.columns);
     this.terminalRows = options.stdout.rows || 24;
     this.altScreenParkPatch = makeAltScreenParkPatch(this.terminalRows);
     this.stylePool = new StylePool();
@@ -396,7 +403,7 @@ export default class Ink {
   // blank→paint flicker). useVirtualScroll's height scaling already bounds
   // the per-resize cost; synchronous handling keeps dimensions consistent.
   private handleResize = () => {
-    const cols = this.options.stdout.columns || 80;
+    const cols = effectiveColumns(this.options.stdout.columns);
     const rows = this.options.stdout.rows || 24;
     // Terminals often emit 2+ resize events for one user action (window
     // settling). Same-dimension events are no-ops; skip to avoid redundant
@@ -522,7 +529,7 @@ export default class Ink {
     this.options.onBeforeRender?.();
 
     const renderStart = performance.now();
-    const terminalWidth = this.options.stdout.columns || 80;
+    const terminalWidth = effectiveColumns(this.options.stdout.columns);
     const terminalRows = this.options.stdout.rows || 24;
 
     const frame = this.renderer({
@@ -685,7 +692,8 @@ export default class Ink {
       // renders the scrolled-but-not-yet-repainted intermediate state.
       // tmux is the main case (re-emits DECSTBM with its own timing and
       // doesn't implement DEC 2026, so SYNC_OUTPUT_SUPPORTED is false).
-      SYNC_OUTPUT_SUPPORTED,
+      // zellij keeps DEC 2026 but ignores margined CSI T (see DECSTBM_SAFE).
+      DECSTBM_SAFE,
     );
     const diffMs = performance.now() - tDiff;
     // Swap buffers
@@ -702,7 +710,9 @@ export default class Ink {
 
     const flickers: FrameEvent['flickers'] = [];
     for (const patch of diff) {
-      if (patch.type === 'clearTerminal') {
+      // [ccb mod] clearViewport = degraded full reset (terminals without 3J);
+      // count/debug it exactly like clearTerminal.
+      if (patch.type === 'clearTerminal' || patch.type === 'clearViewport') {
         flickers.push({
           desiredHeight: frame.screen.height,
           availableHeight: frame.viewport.height,

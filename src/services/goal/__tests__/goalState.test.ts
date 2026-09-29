@@ -252,21 +252,83 @@ describe('max_turns lifecycle', () => {
   })
 })
 
+describe('terminal transitions preserve elapsed active time', () => {
+  test('freezes the final active interval for every stopping status', () => {
+    const cases: Array<{
+      session: string
+      transition: () => void
+    }> = [
+      {
+        session: 'max-turns',
+        transition: () => {
+          getGoal('max-turns')!.turnsExecuted = MAX_GOAL_TURNS
+          markGoalMaxTurnsReached('max-turns')
+        },
+      },
+      {
+        session: 'budget',
+        transition: () => {
+          updateGoalTokens(10, 'budget')
+        },
+      },
+      {
+        session: 'usage',
+        transition: () => {
+          markUsageLimited('usage')
+        },
+      },
+      {
+        session: 'blocked',
+        transition: () => {
+          recordBlockedAttempt('same reason', 'blocked')
+          recordBlockedAttempt('same reason', 'blocked')
+          recordBlockedAttempt('same reason', 'blocked')
+        },
+      },
+    ]
+
+    for (const { session, transition } of cases) {
+      const goal = setGoal('x', {
+        sessionId: session,
+        tokenBudget: session === 'budget' ? 10 : undefined,
+      })
+      goal.startTime -= 5_000
+      transition()
+      expect(goal.accumulatedActiveMs).toBeGreaterThanOrEqual(5_000)
+      const frozen = getActiveElapsedMs(goal)
+      goal.startTime -= 5_000
+      expect(getActiveElapsedMs(goal)).toBe(frozen)
+    }
+  })
+})
+
 describe('formatGoalStatusLabel', () => {
-  test('returns human-readable labels', () => {
-    expect(formatGoalStatusLabel('active')).toBe('Active')
-    expect(formatGoalStatusLabel('paused')).toBe('Paused')
-    expect(formatGoalStatusLabel('blocked')).toBe('Blocked')
-    expect(formatGoalStatusLabel('budget_limited')).toBe('Budget Limited')
-    expect(formatGoalStatusLabel('usage_limited')).toBe('Usage Limited')
-    expect(formatGoalStatusLabel('max_turns')).toBe('Max Turns Reached')
-    expect(formatGoalStatusLabel('complete')).toBe('Complete')
+  test('returns explicit goal status labels', () => {
+    expect(formatGoalStatusLabel('active')).toBe('goal running')
+    expect(formatGoalStatusLabel('paused')).toBe('goal paused')
+    expect(formatGoalStatusLabel('blocked')).toBe('goal blocked')
+    expect(formatGoalStatusLabel('budget_limited')).toBe('goal budget limited')
+    expect(formatGoalStatusLabel('usage_limited')).toBe('goal usage limited')
+    expect(formatGoalStatusLabel('max_turns')).toBe('goal max turns')
+    expect(formatGoalStatusLabel('complete')).toBe('goal achieved')
   })
 })
 
 describe('formatGoalElapsed', () => {
-  test('returns "0s" for brand-new goals', () => {
+  test('retains seconds at minute, hour, and day durations', () => {
     const g = setGoal('x', { sessionId: SESSION })
-    expect(formatGoalElapsed(g)).toBe('0s')
+    g.status = 'paused'
+
+    g.accumulatedActiveMs = 59_000
+    expect(formatGoalElapsed(g)).toBe('59s')
+
+    g.accumulatedActiveMs = 63_000
+    expect(formatGoalElapsed(g)).toBe('1m 3s')
+
+    g.accumulatedActiveMs = 3_723_000
+    expect(formatGoalElapsed(g)).toBe('1h 2m 3s')
+
+    g.accumulatedActiveMs = 90_123_000
+    expect(formatGoalElapsed(g)).toBe('1d 1h 2m 3s')
   })
 })

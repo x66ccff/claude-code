@@ -134,6 +134,40 @@ export function formatTokens(count: number): string {
   return formatNumber(count).replace('.0', '')
 }
 
+// OUTPUT_STATS: compact wall-clock duration for tool runs, rendered as a
+// gray `(2.1s)` suffix on the ⎿ tool-result row. Sub-second runs keep ms
+// precision; ≥60s collapses to `1m 5s`.
+export function formatToolDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  const totalS = Math.round(ms / 1000)
+  const m = Math.floor(totalS / 60)
+  const s = totalS - m * 60
+  return `${m}m ${s}s`
+}
+
+// OUTPUT_STATS: fixed GMT+8 wall-clock formatter for assistant message
+// timestamps (user requirement — display hh:mm:ss in Asia/Shanghai
+// regardless of the machine's local timezone). 'en-GB' yields 24-hour
+// HH:mm:ss. Bun's JSCore ships full ICU so timeZone is honored.
+let shanghaiTimeFormatter: Intl.DateTimeFormat | null = null
+
+export function formatTimeHHMMSS(ts: number | string | Date): string {
+  if (!shanghaiTimeFormatter) {
+    shanghaiTimeFormatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Shanghai',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+  }
+  const date = ts instanceof Date ? ts : new Date(ts)
+  if (Number.isNaN(date.getTime())) return ''
+  return shanghaiTimeFormatter.format(date)
+}
+
 type RelativeTimeStyle = 'long' | 'short' | 'narrow'
 
 type RelativeTimeOptions = {
@@ -198,7 +232,8 @@ export function formatRelativeTimeAgo(
 }
 
 /**
- * Formats log metadata for display (time, size or message count, branch, tag, PR)
+ * Formats log metadata for display (time, size or message count, branch, tag,
+ * PR, hostname)
  */
 export function formatLogMetadata(log: {
   modified: Date
@@ -209,6 +244,7 @@ export function formatLogMetadata(log: {
   agentSetting?: string
   prNumber?: number
   prRepository?: string
+  hostname?: string
 }): string {
   const sizeOrCount =
     log.fileSize !== undefined
@@ -231,6 +267,11 @@ export function formatLogMetadata(log: {
         ? `${log.prRepository}#${log.prNumber}`
         : `#${log.prNumber}`,
     )
+  }
+  // Hostname of the machine the session was created on (only recorded on
+  // linux dsw*/dlc* PAI hosts; presence-based — no flag needed here).
+  if (log.hostname) {
+    parts.push(log.hostname)
   }
   return parts.join(' · ')
 }

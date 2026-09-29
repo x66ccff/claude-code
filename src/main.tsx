@@ -226,6 +226,7 @@ import { countFilesRoundedRg } from './utils/ripgrep.js';
 import { processSessionStartHooks, processSetupHooks } from './utils/sessionStart.js';
 import {
   cacheSessionTitle,
+  describeSessionSearchPaths,
   getSessionIdFromLog,
   loadTranscriptFromFile,
   saveAgentSetting,
@@ -3484,6 +3485,7 @@ async function run(): Promise<CommanderCommand> {
         tasks: {},
         agentNameRegistry: new Map(),
         verbose: verbose ?? getGlobalConfig().verbose ?? false,
+        rawRequestViewEnabled: false,
         mainLoopModel: initialMainLoopModel,
         mainLoopModelForSession: null,
         isBriefOnly: initialIsBriefOnly,
@@ -4303,7 +4305,10 @@ async function run(): Promise<CommanderCommand> {
                 entrypoint: 'cli_flag' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
                 success: false,
               });
-              return await exitWithError(root, `No conversation found with session ID: ${sessionId}`);
+              return await exitWithError(
+                root,
+                `No conversation found with session ID: ${sessionId}\n${describeSessionSearchPaths(sessionId)}`,
+              );
             }
 
             const fullPath = matchedLog?.fullPath ?? result.fullPath;
@@ -4458,7 +4463,7 @@ async function run(): Promise<CommanderCommand> {
         );
       }
     })
-    .version(`${MACRO.VERSION} (Claude Code)`, '-v, --version', 'Output the version number');
+    .version(`v${MACRO.BUILD_VERSION} (Claude Code)`, '-v, --version', 'Output the version number');
 
   // Worktree flags
   program.option('-w, --worktree [name]', 'Create a new git worktree for this session (optionally specify a name)');

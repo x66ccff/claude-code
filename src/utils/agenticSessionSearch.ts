@@ -124,6 +124,9 @@ function logContainsQuery(log: LogOption, queryLower: string): boolean {
   // Check branch
   if (log.gitBranch?.toLowerCase().includes(queryLower)) return true
 
+  // Check hostname (dsw/dlc PAI machine the session was created on)
+  if (log.hostname?.toLowerCase().includes(queryLower)) return true
+
   // Check summary
   if (log.summary?.toLowerCase().includes(queryLower)) return true
 
@@ -221,6 +224,11 @@ export async function agenticSessionSearch(
       // Git branch
       if (log.gitBranch) {
         parts.push(`[branch: ${log.gitBranch}]`)
+      }
+
+      // Hostname of the machine the session was recorded on
+      if (log.hostname) {
+        parts.push(`[host: ${log.hostname}]`)
       }
 
       // Summary

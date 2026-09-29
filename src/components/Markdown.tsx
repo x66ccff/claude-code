@@ -1,8 +1,10 @@
 import { marked, type Token, type Tokens } from 'marked';
-import React, { Suspense, use, useMemo, useRef } from 'react';
+import React, { Suspense, use, useEffect, useMemo, useRef, useState } from 'react';
 import { LRUCache } from 'lru-cache';
 import { useSettings } from '../hooks/useSettings.js';
-import { Ansi, Box, useTheme } from '@anthropic/ink';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { Ansi, Box, Button, NoSelect, Text, getClipboardPath, setClipboard, useTheme } from '@anthropic/ink';
+import { isFullscreenActive, isMouseClicksDisabled, isMouseTrackingEnabled } from '../utils/fullscreen.js';
 import { type CliHighlight, getCliHighlightPromise } from '../utils/cliHighlight.js';
 import { hashContent } from '../utils/hash.js';
 import { configureMarked, formatToken } from '../utils/markdown.js';
@@ -13,6 +15,7 @@ type Props = {
   children: string;
   /** When true, render all text content as dim */
   dimColor?: boolean;
+  copyable?: boolean;
 };
 
 // Module-level token cache — marked.lexer is the hot cost on virtual-scroll
@@ -30,9 +33,7 @@ const tokenCache = new LRUCache<string, Token[]>({ max: 500 });
 // One pass instead of 10× includes scans.
 const MD_SYNTAX_RE = /[#*`|[>\-_~]|\n\n|^\d+\. |\n\d+\. /;
 function hasMarkdownSyntax(s: string): boolean {
-  // Sample first 500 chars — if markdown exists it's usually early (headers,
-  // code fence, list). Long tool outputs are mostly plain text tails.
-  return MD_SYNTAX_RE.test(s.length > 500 ? s.slice(0, 500) : s);
+  return MD_SYNTAX_RE.test(s);
 }
 
 function cachedLexer(content: string): Token[] {
@@ -82,8 +83,67 @@ function MarkdownWithHighlight(props: Props): React.ReactNode {
   return <MarkdownBody {...props} highlight={highlight} />;
 }
 
-function MarkdownBody({ children, dimColor, highlight }: Props & { highlight: CliHighlight | null }): React.ReactNode {
+function CopyableBlock({
+  text,
+  kind,
+  children,
+}: {
+  text: string;
+  kind: 'code' | 'table';
+  children: React.ReactNode;
+}): React.ReactNode {
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  const copy = async () => {
+    const sequence = await setClipboard(text);
+    if (sequence) process.stdout.write(sequence);
+    setFeedback(getClipboardPath() === 'native' ? 'copied' : 'sent to clipboard');
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setFeedback(null), 2000);
+  };
+  return (
+    <Box flexDirection="column" width="100%">
+      <Box width="100%" justifyContent="flex-end" onClick={event => event.stopImmediatePropagation()}>
+        <NoSelect>
+          <Button
+            tabIndex={-1}
+            onAction={() => {
+              void copy();
+            }}
+          >
+            {({ hovered }) => <Text color={hovered ? 'claude' : 'inactive'}>[{feedback ?? `copy ${kind}`}]</Text>}
+          </Button>
+        </NoSelect>
+      </Box>
+      {children}
+    </Box>
+  );
+}
+
+function isCompleteCodeBlock(token: Tokens.Code): boolean {
+  const opening = /^ {0,3}(`{3,}|~{3,})/.exec(token.raw);
+  if (!opening) return true;
+  const fence = opening[1]!;
+  const lines = token.raw.trimEnd().split('\n');
+  const closing = /^ {0,3}(`+|~+)\s*$/.exec(lines.at(-1) ?? '');
+  return lines.length > 1 && closing !== null && closing[1]![0] === fence[0] && closing[1]!.length >= fence.length;
+}
+
+function MarkdownBody({
+  children,
+  dimColor,
+  copyable,
+  highlight,
+}: Props & { highlight: CliHighlight | null }): React.ReactNode {
   const [theme] = useTheme();
+  const { columns } = useTerminalSize();
+  const showCopy = copyable && isFullscreenActive() && isMouseTrackingEnabled() && !isMouseClicksDisabled();
   configureMarked();
 
   const elements = useMemo(() => {
@@ -105,7 +165,23 @@ function MarkdownBody({ children, dimColor, highlight }: Props & { highlight: Cl
     for (const token of tokens) {
       if (token.type === 'table') {
         flushNonTableContent();
-        elements.push(<MarkdownTable key={elements.length} token={token as Tokens.Table} highlight={highlight} />);
+        const table = <MarkdownTable token={token as Tokens.Table} highlight={highlight} />;
+        elements.push(
+          showCopy ? (
+            <CopyableBlock key={elements.length} text={token.raw.trimEnd()} kind="table">
+              {table}
+            </CopyableBlock>
+          ) : (
+            <React.Fragment key={elements.length}>{table}</React.Fragment>
+          ),
+        );
+      } else if (showCopy && token.type === 'code' && isCompleteCodeBlock(token as Tokens.Code)) {
+        flushNonTableContent();
+        elements.push(
+          <CopyableBlock key={elements.length} text={(token as Tokens.Code).text} kind="code">
+            <Ansi dimColor={dimColor}>{formatToken(token, theme, 0, null, null, highlight).trimEnd()}</Ansi>
+          </CopyableBlock>,
+        );
       } else {
         nonTableContent += formatToken(token, theme, 0, null, null, highlight);
       }
@@ -113,10 +189,11 @@ function MarkdownBody({ children, dimColor, highlight }: Props & { highlight: Cl
 
     flushNonTableContent();
     return elements;
-  }, [children, dimColor, highlight, theme]);
+  }, [children, dimColor, highlight, theme, showCopy]);
 
+  // Rebuild copy-enabled bounds on resize; cached descendants can retain old screen coordinates.
   return (
-    <Box flexDirection="column" gap={1}>
+    <Box key={showCopy ? columns : undefined} flexDirection="column" gap={1}>
       {elements}
     </Box>
   );
@@ -182,7 +259,7 @@ export function StreamingMarkdown({ children }: StreamingProps): React.ReactNode
   // so it never re-parses as the unstable suffix grows
   return (
     <Box flexDirection="column" gap={1}>
-      {stablePrefix && <Markdown>{stablePrefix}</Markdown>}
+      {stablePrefix && <Markdown copyable>{stablePrefix}</Markdown>}
       {unstableSuffix && <Markdown>{unstableSuffix}</Markdown>}
     </Box>
   );

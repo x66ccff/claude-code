@@ -1,5 +1,4 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
-import { isUltrathinkEnabled } from './thinking.js'
 import { getInitialSettings } from './settings/settings.js'
 import { isProSubscriber, isMaxSubscriber, isTeamSubscriber } from './auth.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
@@ -235,19 +234,7 @@ export function resolveAppliedEffort(
   if (envOverride === null) {
     return undefined
   }
-  const resolved =
-    envOverride ?? appStateEffortValue ?? getDefaultEffortForModel(model)
-  // OpenAI Responses uses xhigh as its highest public reasoning effort.
-  // Keep /effort max usable as a familiar alias in ChatGPT subscription mode.
-  if (
-    resolved === 'max' &&
-    getAPIProvider() === 'openai' &&
-    isChatGPTAuthMode() &&
-    modelSupportsXhighEffort(model)
-  ) {
-    return 'xhigh'
-  }
-  return resolved
+  return envOverride ?? appStateEffortValue ?? getDefaultEffortForModel(model)
 }
 
 /**
@@ -422,9 +409,13 @@ export function getDefaultEffortForModel(
     }
   }
 
-  // When ultrathink feature is on, default effort to medium (ultrathink bumps to high)
-  if (isUltrathinkEnabled() && modelSupportsEffort(model)) {
-    return 'medium'
+  // [ccb mod] fork 默认 effort = low（上游原逻辑：ultrathink 开启 → 'medium'，
+  // 否则 undefined → API 侧默认 high）。主力模型 qwen3.8-max 经 PAI 网关实测
+  // output_config.effort 生效，low 思考最短、省 token 省时延。覆盖优先级不变：
+  // env CLAUDE_CODE_EFFORT_LEVEL → settings.effortLevel / --effort / EffortCallout
+  // → 此默认值。ultrathink 关键词按次 bump 走 attachments 路径，不受影响。
+  if (modelSupportsEffort(model)) {
+    return 'low'
   }
 
   // Fallback to undefined, which means we don't set an effort level. This

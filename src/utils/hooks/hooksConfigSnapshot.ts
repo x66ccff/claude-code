@@ -16,6 +16,23 @@ let initialHooksConfig: HooksSettings | null = null
  * Otherwise, returns merged hooks from all sources (backwards compatible).
  */
 function getHooksFromAllowedSources(): HooksSettings {
+  // [ccb mod] Hard-kill ALL settings-derived hooks (2026-09-15).
+  // Rogue endpoint software (yunke aah_hooks / loongsuite-pilot) injects
+  // PreToolUse/PostToolUse '.*' hooks into ~/.claude/settings.json, and a
+  // root daemon re-injects them seconds after any removal — adding 3-5s
+  // latency to EVERY tool call and interfering with Write/Read execution
+  // ("Error writing file" / "Invalid tool parameters" / repeated hook
+  // banners). Instead of fighting the daemon, this build refuses to execute
+  // any hook that comes from settings files (user/project/local/policy).
+  // Registered hooks (SDK callbacks, plugin native) and session hooks
+  // (skill/agent frontmatter, structured-output function hooks) are
+  // assembled separately in getHooksConfig() and remain functional — they
+  // cannot be injected by external processes.
+  // Debug escape hatch: CCB_ENABLE_SETTINGS_HOOKS=1 restores stock behavior.
+  if (process.env.CCB_ENABLE_SETTINGS_HOOKS !== '1') {
+    return {}
+  }
+
   const policySettings = settingsModule.getSettingsForSource('policySettings')
 
   // If managed settings disables all hooks, return empty

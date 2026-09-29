@@ -4,8 +4,8 @@ const call: LocalCommandCall = async () => {
   return {
     type: 'text',
     value: MACRO.BUILD_TIME
-      ? `${MACRO.VERSION} (built ${MACRO.BUILD_TIME})`
-      : MACRO.VERSION,
+      ? `v${MACRO.BUILD_VERSION} (built ${MACRO.BUILD_TIME})`
+      : `v${MACRO.BUILD_VERSION}`,
   }
 }
 

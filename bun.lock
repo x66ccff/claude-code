@@ -237,6 +237,7 @@
       "version": "1.0.0",
       "dependencies": {
         "@claude-code-best/agent-tools": "workspace:*",
+        "marked": "^17.0.6",
       },
     },
     "packages/cloud-artifacts": {
@@ -624,8 +625,6 @@
     "@cloudflare/workerd-linux-arm64": ["@cloudflare/workerd-linux-arm64@1.20260617.1", "", { "os": "linux", "cpu": "arm64" }, "sha512-MRoifFYcqbxxIIQy7PqO5tFY/qPFSnjXzakWl0sO93l+HLyG35jRAgOi6jfqa4kBxc7gKKtH861DcewjxUfkjA=="],
 
     "@cloudflare/workerd-windows-64": ["@cloudflare/workerd-windows-64@1.20260617.1", "", { "os": "win32", "cpu": "x64" }, "sha512-rgBV9wQrv0OSKgCTTbhFUFY3sLGNANZ88aqaLvtmEn2gmbFVb1J4PDGochVUdB7NSEp4D/ghHva6/8SZmbONpw=="],
-
-    "@cloudflare/workers-types": ["@cloudflare/workers-types@4.20260620.1", "", {}, "sha512-WB81w9u1bAS7KcekpC7/nYhLpIXAEtgybso7XgGJV8CQKNkNPYcyjvICLdghOlDBi/9Ivk+f7NRckV2Bkq1bDg=="],
 
     "@commander-js/extra-typings": ["@commander-js/extra-typings@14.0.0", "https://registry.npmmirror.com/@commander-js/extra-typings/-/extra-typings-14.0.0.tgz", { "peerDependencies": { "commander": "~14.0.0" } }, "sha512-hIn0ncNaJRLkZrxBIp5AsW/eXEHNKYQBh0aPdoUqNgD+Io3NIykQqpKFyKcuasZhicGaEZJX/JBSIkZ4e5x8Dg=="],
 
@@ -3142,6 +3141,8 @@
     "@claude-code-best/mcp-client/p-map": ["p-map@4.0.0", "https://registry.npmmirror.com/p-map/-/p-map-4.0.0.tgz", { "dependencies": { "aggregate-error": "^3.0.0" } }, "sha512-/bjOqmgETBYB5BoEeGVea8dmvHb2m9GLy1E9W43yeyfP6QQCZGFNa+XRceJEuDB6zqr+gKpIAmlLebMpykw/MQ=="],
 
     "@claude-code-best/mcp-client/zod": ["zod@3.25.76", "https://registry.npmmirror.com/zod/-/zod-3.25.76.tgz", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
+
+    "@commander-js/extra-typings/commander": ["commander@14.0.3", "", {}, "sha512-H+y0Jo/T1RZ9qPP4Eh1pkcQcLRglraJaSLoyOtHxu6AapkjWVCy2Sit1QQ4x3Dng8qDlSsZEet7g5Pq06MvTgw=="],
 
     "@cspotcode/source-map-support/@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.9", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.0.3", "@jridgewell/sourcemap-codec": "^1.4.10" } }, "sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ=="],
 

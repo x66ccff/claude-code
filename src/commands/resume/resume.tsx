@@ -10,7 +10,7 @@ import { Spinner } from '../../components/Spinner.js';
 import { useIsInsideModal } from '../../context/modalContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { setClipboard } from '@anthropic/ink';
-import { Box, Text } from '@anthropic/ink';
+import { Box, Text, useInput } from '@anthropic/ink';
 import type { LocalJSXCommandCall } from '../../types/command.js';
 import type { LogOption } from '../../types/logs.js';
 import { agenticSessionSearch } from '../../utils/agenticSessionSearch.js';
@@ -167,11 +167,25 @@ function ResumeCommand({
     onDone('Resume cancelled', { display: 'system' });
   }
 
+  // [ccb mod] Let Ctrl-C / q abort the loading & resuming spinners. Session
+  // files may sit on slow network mounts (ossfs/CPFS) where the scan takes a
+  // long time; without a key handler the user is stuck on the spinner. The
+  // load path is async so the event loop stays responsive between file reads.
+  useInput(
+    (input, key) => {
+      if ((key.ctrl && input === 'c') || input === 'q' || input === 'Q') {
+        handleCancel();
+      }
+    },
+    { isActive: loading || resuming },
+  );
+
   if (loading) {
     return (
       <Box>
         <Spinner />
         <Text> Loading conversations…</Text>
+        <Text dimColor> (q or Ctrl-C to cancel)</Text>
       </Box>
     );
   }
@@ -181,6 +195,7 @@ function ResumeCommand({
       <Box>
         <Spinner />
         <Text> Resuming conversation…</Text>
+        <Text dimColor> (q or Ctrl-C to cancel)</Text>
       </Box>
     );
   }

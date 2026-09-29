@@ -1,6 +1,6 @@
 import * as React from 'react';
 import type { Command } from '../commands.js';
-import { Box } from '@anthropic/ink';
+import { Box, Text } from '@anthropic/ink';
 import type { Screen } from '../screens/REPL.js';
 import type { Tools } from '../Tool.js';
 import type { RenderableMessage } from '../types/message.js';
@@ -63,6 +63,14 @@ export type Props = {
   isLoading: boolean;
   lookups: ReturnType<typeof buildMessageLookups>;
   shouldCollapseDiffs?: boolean;
+  /**
+   * OUTPUT_STATS: pre-formatted gray stats line (`↓ N tokens · X tok/s`) for
+   * the last text-bearing assistant record of each API response, null for all
+   * other rows. Pre-formatted (rather than the raw streamStats object) so the
+   * memo comparator below can detect stats that claude.ts mutates onto the
+   * message after streaming ends — mutation doesn't change the message ref.
+   */
+  streamStatsText?: string | null;
 };
 
 /**
@@ -142,6 +150,7 @@ function MessageRowImpl({
   isLoading,
   lookups,
   shouldCollapseDiffs,
+  streamStatsText,
 }: Props): React.ReactNode {
   const isTranscriptMode = screen === 'transcript';
   const isGrouped = msg.type === 'grouped_tool_use';
@@ -221,7 +230,18 @@ function MessageRowImpl({
   // change forces log-update.ts into a full terminal reset per tick. Freezing
   // returns the cached element ref so React bails and produces zero diff.
   if (!hasMetadata) {
-    return <OffscreenFreeze>{messageEl}</OffscreenFreeze>;
+    return streamStatsText ? (
+      <OffscreenFreeze>
+        <Box flexDirection="column">
+          {messageEl}
+          <Box paddingLeft={2}>
+            <Text dimColor>{streamStatsText}</Text>
+          </Box>
+        </Box>
+      </OffscreenFreeze>
+    ) : (
+      <OffscreenFreeze>{messageEl}</OffscreenFreeze>
+    );
   }
   // Margin on children, not here — else null items (hook_success etc.) get phantom 1-row spacing.
   return (
@@ -232,6 +252,11 @@ function MessageRowImpl({
           <MessageModel message={displayMsg} isTranscriptMode={isTranscriptMode} />
         </Box>
         {messageEl}
+        {streamStatsText ? (
+          <Box paddingLeft={2}>
+            <Text dimColor>{streamStatsText}</Text>
+          </Box>
+        ) : null}
       </Box>
     </OffscreenFreeze>
   );
@@ -296,6 +321,11 @@ export function areMessageRowPropsEqual(prev: Props, next: Props): boolean {
 
   // Verbose toggle changes thinking block visibility
   if (prev.verbose !== next.verbose) return false;
+
+  // OUTPUT_STATS: streamStats is mutated onto the message after the final
+  // message_delta — the message ref doesn't change, but the pre-formatted
+  // stats string does. Compare it so the memo doesn't swallow the update.
+  if (prev.streamStatsText !== next.streamStatsText) return false;
 
   // collapsed_read_search is never static in prompt mode (matches shouldRenderStatically)
   if (prev.message.type === 'collapsed_read_search' && next.screen !== 'transcript') {

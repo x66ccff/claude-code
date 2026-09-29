@@ -1,6 +1,6 @@
 # WEB_SEARCH_TOOL — 网页搜索工具
 
-> 实现状态：适配器架构完成，支持 API / Bing / Brave / Exa / Serper 后端
+> 实现状态：适配器架构完成，支持 API / Bing / Brave / Exa / Serper / Tavily 后端
 > 引用数：核心工具，无 feature flag 门控（始终启用）
 
 ## 一、功能概述
@@ -129,9 +129,9 @@ Bing 返回的重定向 URL 格式：`bing.com/ck/a?...&u=a1aHR0cHM6Ly9...`
 
 ```typescript
 export function createAdapter(): WebSearchAdapter {
-  // 1. WEB_SEARCH_ADAPTER=api|bing|brave|exa|serper 显式指定
-  // 2. Anthropic 官方 API Base URL → ApiSearchAdapter
-  // 3. 第三方代理 / 非官方端点 → BingSearchAdapter
+  // 1. WEB_SEARCH_ADAPTER=api|bing|brave|exa|serper|tavily 显式指定
+  // 2. settings.webSearchAdapter（通过 /web-tools 配置）
+  // 3. 已配置 Tavily 凭据或端点时使用 Tavily，否则使用 Bing
 }
 ```
 

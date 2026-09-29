@@ -128,7 +128,7 @@ function ProactiveCountdown(): React.ReactNode {
   return <Text dimColor>waiting {formatDuration(remainingSeconds * 1000, { mostSignificantOnly: true })}</Text>;
 }
 
-/** Compact "goal (1h22min)" pill for the footer — colored by status. */
+/** Compact goal status and elapsed-time pill for the footer. */
 function GoalElapsedIndicator(): React.ReactNode {
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -141,22 +141,10 @@ function GoalElapsedIndicator(): React.ReactNode {
   const goal = goalModule.getGoal();
   if (!goal) return null;
 
-  const elapsedMs = goalModule.getActiveElapsedMs(goal);
-  const totalSeconds = Math.floor(elapsedMs / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
+  const status = goalModule.formatGoalStatusLabel(goal.status);
+  const elapsed = goalModule.formatGoalElapsed(goal);
 
-  let timeStr: string;
-  if (hours >= 1) {
-    timeStr = `${hours}h${minutes}min`;
-  } else if (minutes >= 1) {
-    timeStr = `${minutes}min`;
-  } else {
-    timeStr = `${seconds}s`;
-  }
-
-  let color: string | undefined;
+  let color: 'ansi:green' | 'ansi:yellow' | 'ansi:red' | 'ansi:cyan' | undefined;
   switch (goal.status) {
     case 'active':
       color = 'ansi:green';
@@ -164,6 +152,7 @@ function GoalElapsedIndicator(): React.ReactNode {
     case 'paused':
     case 'budget_limited':
     case 'usage_limited':
+    case 'max_turns':
       color = 'ansi:yellow';
       break;
     case 'blocked':
@@ -174,7 +163,11 @@ function GoalElapsedIndicator(): React.ReactNode {
       break;
   }
 
-  return <Text color={color as 'ansi:green'}>goal ({timeStr})</Text>;
+  return (
+    <Text color={color}>
+      {status} ({elapsed})
+    </Text>
+  );
 }
 
 export function PromptInputFooterLeftSide({

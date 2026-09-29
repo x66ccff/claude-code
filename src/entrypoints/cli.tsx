@@ -9,8 +9,10 @@ import { isEnvTruthy } from '../utils/envUtils.js';
 // Runtime fallback for MACRO.* when not injected by build/dev defines.
 // This happens when running cli.tsx directly (not via `bun run dev` or built dist/).
 if (typeof globalThis.MACRO === 'undefined') {
+  const version = process.env.CLAUDE_CODE_VERSION || '2.8.4';
   (globalThis as any).MACRO = {
-    VERSION: process.env.CLAUDE_CODE_VERSION || '2.1.888',
+    VERSION: version,
+    BUILD_VERSION: process.env.CLAUDE_CODE_BUILD_VERSION || version,
     BUILD_TIME: new Date().toISOString(),
     FEEDBACK_CHANNEL: '',
     ISSUES_EXPLAINER: '',
@@ -78,8 +80,7 @@ async function main(): Promise<void> {
 
   // Fast-path for --version/-v: zero module loading needed
   if (args.length === 1 && (args[0] === '--version' || args[0] === '-v' || args[0] === '-V')) {
-    // MACRO.VERSION is inlined at build time
-    console.log(`${MACRO.VERSION} (Claude Code)`);
+    console.log(`v${MACRO.BUILD_VERSION} (Claude Code)`);
     return;
   }
 

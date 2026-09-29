@@ -34,11 +34,15 @@ function makeChunk(
 }
 
 /** Collect all emitted Anthropic events from the stream adapter for assertion */
-async function collectEvents(chunks: ChatCompletionChunk[]) {
+async function collectEvents(
+  chunks: ChatCompletionChunk[],
+  options?: { includeCacheWriteTokens?: boolean },
+) {
   const events: any[] = []
   for await (const event of adaptOpenAIStreamToAnthropic(
     mockStream(chunks),
     'gpt-4o',
+    options,
   )) {
     events.push(event)
   }
@@ -548,6 +552,45 @@ describe('thinking support (reasoning_content / reasoning)', () => {
     expect(thinkingDeltas).toHaveLength(0)
   })
 
+  test('ignores empty reasoning_content after text streaming has started', async () => {
+    const events = await collectEvents([
+      makeChunk({
+        choices: [
+          { index: 0, delta: { content: 'Hello' }, finish_reason: null },
+        ],
+      }),
+      makeChunk({
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning_content: '', content: ' world' },
+            finish_reason: null,
+          },
+        ],
+      }),
+      makeChunk({
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      }),
+    ])
+
+    const blockStarts = events.filter(
+      e => e.type === 'content_block_start',
+    ) as any[]
+    expect(blockStarts).toHaveLength(1)
+    expect(blockStarts[0].content_block.type).toBe('text')
+
+    const textDeltas = events.filter(
+      e => e.type === 'content_block_delta' && e.delta.type === 'text_delta',
+    ) as any[]
+    expect(textDeltas.map(e => e.index)).toEqual([0, 0])
+    expect(textDeltas.map(e => e.delta.text).join('')).toBe('Hello world')
+
+    const blockStops = events.filter(
+      e => e.type === 'content_block_stop',
+    ) as any[]
+    expect(blockStops.map(e => e.index)).toEqual([0])
+  })
+
   test('thinking block index is 0, text block index is 1', async () => {
     const events = await collectEvents([
       makeChunk({
@@ -582,6 +625,60 @@ describe('thinking support (reasoning_content / reasoning)', () => {
 })
 
 describe('prompt caching support', () => {
+  test('maps official OpenAI cache writes when explicitly enabled', async () => {
+    const events = await collectEvents(
+      [
+        makeChunk({
+          choices: [
+            { index: 0, delta: { content: 'hi' }, finish_reason: null },
+          ],
+        }),
+        makeChunk({
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: {
+            prompt_tokens: 1000,
+            completion_tokens: 50,
+            total_tokens: 1050,
+            prompt_tokens_details: {
+              cached_tokens: 600,
+              cache_write_tokens: 250,
+            },
+          } as any,
+        }),
+      ],
+      { includeCacheWriteTokens: true },
+    )
+
+    const msgDelta = events.find(e => e.type === 'message_delta') as any
+    expect(msgDelta.usage.input_tokens).toBe(150)
+    expect(msgDelta.usage.cache_read_input_tokens).toBe(600)
+    expect(msgDelta.usage.cache_creation_input_tokens).toBe(250)
+  })
+
+  test('ignores cache writes for compatible providers by default', async () => {
+    const events = await collectEvents([
+      makeChunk({
+        choices: [{ index: 0, delta: { content: 'hi' }, finish_reason: null }],
+      }),
+      makeChunk({
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: {
+          prompt_tokens: 1000,
+          completion_tokens: 50,
+          total_tokens: 1050,
+          prompt_tokens_details: {
+            cached_tokens: 600,
+            cache_write_tokens: 250,
+          },
+        } as any,
+      }),
+    ])
+
+    const msgDelta = events.find(e => e.type === 'message_delta') as any
+    expect(msgDelta.usage.input_tokens).toBe(400)
+    expect(msgDelta.usage.cache_creation_input_tokens).toBe(0)
+  })
+
   test('maps cached_tokens to cache_read_input_tokens', async () => {
     const events = await collectEvents([
       makeChunk({

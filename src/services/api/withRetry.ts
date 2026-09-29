@@ -46,6 +46,13 @@ import {
 } from '../rateLimitMocking.js'
 import { REPEATED_529_ERROR_MESSAGE } from './errors.js'
 import { extractConnectionErrorDetails } from './errorUtils.js'
+import {
+  type RateLimitRetryState,
+  type RetrySleeper,
+  isRateLimitError,
+  isRateLimitNonRetryable,
+  waitForRateLimitRetry,
+} from './rateLimitRetry.js'
 
 const abortError = () => new APIUserAbortError()
 
@@ -139,6 +146,8 @@ interface RetryOptions {
    * regardless of which request mode hit the overload.
    */
   initialConsecutive529Errors?: number
+  rateLimitState?: RateLimitRetryState
+  rateLimitSleeper?: RetrySleeper
 }
 
 export class CannotRetryError extends Error {
@@ -186,10 +195,17 @@ export async function* withRetry<T>(
   let consecutive529Errors = options.initialConsecutive529Errors ?? 0
   let lastError: unknown
   let persistentAttempt = 0
-  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+  let attempt = 0
+  let nonRateLimitFailures = 0
+  const rateLimitState = options.rateLimitState ?? { failures: 0 }
+  while (true) {
+    if (nonRateLimitFailures > maxRetries) {
+      throw new CannotRetryError(lastError, retryContext)
+    }
     if (options.signal?.aborted) {
       throw new APIUserAbortError()
     }
+    attempt++
 
     // Capture whether fast mode is active before this attempt
     // (fallback may change the state mid-loop)
@@ -254,9 +270,36 @@ export async function* withRetry<T>(
     } catch (error) {
       lastError = error
       logForDebugging(
-        `API error (attempt ${attempt}/${maxRetries + 1}): ${error instanceof APIError ? `${error.status} ${error.message}` : errorMessage(error)}`,
+        `API error (attempt ${attempt}): ${error instanceof APIError ? `${error.status} ${error.message}` : errorMessage(error)}`,
         { level: 'error' },
       )
+
+      // Rate-limit retries are a fixed, provider-independent policy. Keep this
+      // ahead of fast/background/fallback logic so none of those paths can
+      // shorten, extend, or replace the 10-attempt sequence. Errors marked
+      // non-retryable (visible output already streamed) fall through to the
+      // normal non-retryable handling below. /mock-limits 429s are a debug
+      // feature meant to surface immediately, so they are excluded too.
+      if (
+        isRateLimitError(error) &&
+        !isRateLimitNonRetryable(error) &&
+        !(error instanceof APIError && isMockRateLimitError(error))
+      ) {
+        try {
+          await waitForRateLimitRetry(error, rateLimitState, {
+            signal: options.signal,
+            sleeper:
+              options.rateLimitSleeper ??
+              ((ms, signal) => sleep(ms, signal, { abortError })),
+          })
+        } catch (rateLimitError) {
+          if (options.signal?.aborted) throw new APIUserAbortError()
+          throw new CannotRetryError(rateLimitError, retryContext)
+        }
+        continue
+      }
+
+      nonRateLimitFailures++
 
       // Fast mode fallback: on 429/529, either wait and retry (short delays)
       // or fall back to standard speed (long delays) to avoid cache thrashing.
@@ -367,7 +410,7 @@ export async function* withRetry<T>(
       // Only retry if the error indicates we should
       const persistent =
         isPersistentRetryEnabled() && isTransientCapacityError(error)
-      if (attempt > maxRetries && !persistent) {
+      if (nonRateLimitFailures > maxRetries && !persistent) {
         throw new CannotRetryError(error, retryContext)
       }
 
@@ -459,12 +502,12 @@ export async function* withRetry<T>(
           PERSISTENT_RESET_CAP_MS,
         )
       } else {
-        delayMs = getRetryDelay(attempt, retryAfter)
+        delayMs = getRetryDelay(nonRateLimitFailures, retryAfter)
       }
 
-      // In persistent mode the for-loop `attempt` is clamped at maxRetries+1;
-      // use persistentAttempt for telemetry/yields so they show the true count.
-      const reportedAttempt = persistent ? persistentAttempt : attempt
+      const reportedAttempt = persistent
+        ? persistentAttempt
+        : nonRateLimitFailures
       logEvent('tengu_api_retry', {
         attempt: reportedAttempt,
         delayMs: delayMs,
@@ -501,12 +544,14 @@ export async function* withRetry<T>(
           await sleep(chunk, options.signal, { abortError })
           remaining -= chunk
         }
-        // Clamp so the for-loop never terminates. Backoff uses the separate
-        // persistentAttempt counter which keeps growing to the 5-min cap.
-        if (attempt >= maxRetries) attempt = maxRetries
       } else {
         if (error instanceof APIError) {
-          yield createSystemAPIErrorMessage(error, delayMs, attempt, maxRetries)
+          yield createSystemAPIErrorMessage(
+            error,
+            delayMs,
+            nonRateLimitFailures,
+            maxRetries,
+          )
         }
         await sleep(delayMs, options.signal, { abortError })
       }

@@ -145,6 +145,11 @@ export type CompactProgressEvent =
     }
   | { type: 'compact_start' }
   | { type: 'compact_end' }
+  // source identifies which fork emitted the delta. ALL forked agents emit
+  // compact_text_delta (see forkedAgent.ts), so the UI must filter on
+  // source === 'compact' to avoid leaking background-fork output into the
+  // compaction marquee.
+  | { type: 'compact_text_delta'; text: string; source?: QuerySource }
 
 export type ToolUseContext = {
   options: {
@@ -324,7 +329,8 @@ export function filterToolProgressMessages(
 ): ProgressMessage<ToolProgressData>[] {
   return progressMessagesForMessage.filter(
     (msg): msg is ProgressMessage<ToolProgressData> =>
-      (msg.data as { type?: string })?.type !== 'hook_progress',
+      msg.data != null &&
+      (msg.data as { type?: string }).type !== 'hook_progress',
   )
 }
 

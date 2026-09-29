@@ -52,7 +52,7 @@ describe('createAdapter', () => {
     expect(bingAdapter).not.toBe(braveAdapter)
   })
 
-  test('uses a configured setting or the Serper machine default', () => {
+  test('uses a configured setting or an available default', () => {
     delete process.env.WEB_SEARCH_ADAPTER
 
     const adapter = createAdapter()

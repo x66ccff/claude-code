@@ -62,6 +62,25 @@ export type Message = {
 export type AssistantMessage = Message & {
   type: 'assistant'
   message: NonNullable<Message['message']>
+  /**
+   * Client-side streaming statistics attached when the API response's final
+   * usage arrives (OUTPUT_STATS). Persisted with the transcript so output
+   * speed remains visible after resume. Absent on non-streaming fallbacks
+   * and messages loaded from older sessions.
+   */
+  streamStats?: {
+    firstDeltaMs: number
+    endMs: number
+    tokensPerSec: number
+    /**
+     * Timestamp (ms epoch) when the API request that produced this message
+     * started (last attempt if STALL_RETRY re-requested). Fixed at message
+     * creation so it persists via the transcript spread-at-yield path.
+     * Absent/zero on messages from older transcripts — renderers must fall
+     * back to firstDeltaMs for duration.
+     */
+    requestStartMs?: number
+  }
 }
 export type AttachmentMessage<T = { type: string; [key: string]: unknown }> =
   Message & { type: 'attachment'; attachment: T }
@@ -75,6 +94,12 @@ export type UserMessage = Message & {
   type: 'user'
   message: NonNullable<Message['message']>
   imagePasteIds?: number[]
+  /**
+   * OUTPUT_STATS: duration (ms) of the tool run that produced this
+   * tool_result message. Top-level so it persists via the transcript
+   * spread-at-yield path; absent on older transcripts.
+   */
+  toolDurationMs?: number
 }
 export type NormalizedUserMessage = UserMessage
 export type RequestStartEvent = { type: string; [key: string]: unknown }

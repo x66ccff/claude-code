@@ -70,7 +70,12 @@ import { updateSessionName } from './concurrentSessions.js'
 import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
-import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
+import {
+  getClaudeConfigHomeDir,
+  getRecordedSessionHostname,
+  isEnvTruthy,
+  isRecordableSessionHostname,
+} from './envUtils.js'
 import { isFsInaccessible } from './errors.js'
 import type { FileHistorySnapshot } from './fileHistory.js'
 import { formatFileSize } from './format.js'
@@ -1040,6 +1045,11 @@ class Project {
         gitBranch = undefined
       }
 
+      // Machine hostname for the /resume picker — defined only on linux
+      // dsw*/dlc* (PAI) hosts with RESUME_HOSTNAME enabled; undefined
+      // elsewhere so JSON.stringify drops the field entirely.
+      const sessionHostname = getRecordedSessionHostname()
+
       // Get slug if one exists for this session (used for plan files, etc.)
       const sessionId = getSessionId()
       const slug = getPlanSlugCache().get(sessionId)
@@ -1084,6 +1094,7 @@ class Project {
           version: VERSION,
           gitBranch,
           slug,
+          hostname: sessionHostname,
         }
         await this.appendEntry(transcriptMessage)
         if (isChainParticipant(message)) {
@@ -2558,6 +2569,9 @@ function convertToLogOption(
     attributionSnapshots: attributionSnapshots,
     contentReplacements,
     gitBranch: lastMessage.gitBranch,
+    // ORIGINAL machine → firstMessage, not lastMessage: a session resumed on
+    // a different dsw/dlc host gets newer lines stamped with the new host.
+    hostname: firstMessage.hostname,
     projectPath: firstMessage.cwd,
   }
 }
@@ -3918,9 +3932,80 @@ export async function loadTranscriptFile(
 }
 
 /**
- * Loads all messages, summaries, file history snapshots, and attribution snapshots from a specific session file.
+ * Resolve the absolute path of a session transcript by ID.
+ *
+ * Fast path: the current project dir (cwd-scoped) — the common case where you
+ * resume from the same directory you started in. Fallback: scan every project
+ * dir under <configHome>/projects, so `ccb -r <id>` finds the session no
+ * matter which directory you launch from (cross-project / cross-worktree /
+ * shared-home resume). Session IDs are UUIDs, so at most one project dir holds
+ * the file; the first match wins.
+ *
+ * Returns the absolute path, or null when the session cannot be found.
  */
-async function loadSessionFile(sessionId: UUID): Promise<{
+export async function resolveSessionFilePath(
+  sessionId: string,
+): Promise<string | null> {
+  const primary = join(
+    getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
+    `${sessionId}.jsonl`,
+  )
+  if (await sessionFileExists(primary)) return primary
+
+  const projectsDir = getProjectsDir()
+  let dirents: Dirent[]
+  try {
+    dirents = await readdir(projectsDir, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  for (const dirent of dirents) {
+    if (!dirent.isDirectory()) continue
+    const candidate = join(projectsDir, dirent.name, `${sessionId}.jsonl`)
+    if (candidate === primary) continue
+    if (await sessionFileExists(candidate)) return candidate
+  }
+  return null
+}
+
+async function sessionFileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Human-readable description of every absolute path resume-by-ID searches,
+ * for error messages and debugging. Mirrors resolveSessionFilePath's logic:
+ * the cwd-scoped project transcript first, then the cross-project scan root.
+ */
+export function describeSessionSearchPaths(sessionId: string): string {
+  const primary = join(
+    getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
+    `${sessionId}.jsonl`,
+  )
+  const projectsDir = getProjectsDir()
+  return (
+    `Searched: ${primary} (current project dir), ` +
+    `then ${projectsDir}/<every project>/${sessionId}.jsonl. ` +
+    `Check CLAUDE_CONFIG_DIR / the projects symlink if a session is missing.`
+  )
+}
+
+/**
+ * Loads all messages, summaries, file history snapshots, and attribution snapshots from a specific session file.
+ *
+ * `resolvedPath` lets callers that already located the transcript (e.g.
+ * getLastSessionLog, which needs the real path for cross-directory resume)
+ * skip a second resolveSessionFilePath scan.
+ */
+async function loadSessionFile(
+  sessionId: UUID,
+  resolvedPath?: string | null,
+): Promise<{
   messages: Map<UUID, TranscriptMessage>
   summaries: Map<UUID, string>
   customTitles: Map<UUID, string>
@@ -3934,10 +4019,18 @@ async function loadSessionFile(sessionId: UUID): Promise<{
   contextCollapseCommits: ContextCollapseCommitEntry[]
   contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
 }> {
-  const sessionFile = join(
-    getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
-    `${sessionId}.jsonl`,
-  )
+  // When the session isn't in the cwd-scoped project dir, fall back to a
+  // cross-project scan. If still not found, pass the (non-existent) primary
+  // path so loadTranscriptFile returns empty maps — the established
+  // "not found" signal (messages.size === 0).
+  const sessionFile =
+    (resolvedPath !== undefined
+      ? resolvedPath
+      : await resolveSessionFilePath(sessionId)) ??
+    join(
+      getSessionProjectDir() ?? getProjectDir(getOriginalCwd()),
+      `${sessionId}.jsonl`,
+    )
   return loadTranscriptFile(sessionFile)
 }
 
@@ -4006,6 +4099,12 @@ export async function doesMessageExistInSession(
 export async function getLastSessionLog(
   sessionId: UUID,
 ): Promise<LogOption | null> {
+  // Resolve the transcript path first (cwd-scoped fast path, cross-project
+  // fallback) so a session created in a different working directory — or under
+  // a shared-home symlink — still resumes. The resolved path is reused as the
+  // LogOption.fullPath so processResumedConversation can switchSession into
+  // the right project dir and append subsequent messages to the correct file.
+  const resolvedPath = await resolveSessionFilePath(sessionId)
   // Single read: load all session data at once instead of reading the file twice
   const {
     messages,
@@ -4020,7 +4119,7 @@ export async function getLastSessionLog(
     goals,
     contextCollapseCommits,
     contextCollapseSnapshot,
-  } = await loadSessionFile(sessionId)
+  } = await loadSessionFile(sessionId, resolvedPath)
   if (messages.size === 0) return null
   // Prime getSessionMessages cache so recordTranscript (called after REPL
   // mount on --resume) skips a second full file load. -170~227ms on large sessions.
@@ -4051,7 +4150,7 @@ export async function getLastSessionLog(
       customTitle,
       buildFileHistorySnapshotChain(fileHistorySnapshots, transcript),
       tag,
-      getTranscriptPathForSession(sessionId),
+      resolvedPath ?? getTranscriptPathForSession(sessionId),
       buildAttributionSnapshotChain(attributionSnapshots, transcript),
       agentSetting,
       contentReplacements.get(sessionId) ?? [],
@@ -4723,6 +4822,7 @@ const INITIAL_ENRICH_COUNT = 50
 type LiteMetadata = {
   firstPrompt: string
   gitBranch?: string
+  hostname?: string
   isSidechain: boolean
   projectPath?: string
   teamName?: string
@@ -4821,6 +4921,10 @@ export async function loadAllLogsFromSessionFile(
       prUrl: prUrls.get(sessionId),
       prRepository: prRepositories.get(sessionId),
       gitBranch: leafMessage.gitBranch,
+      // ORIGINAL machine → firstMessage (deliberately not leafMessage, unlike
+      // gitBranch): newer lines may carry a different host after a
+      // cross-machine resume.
+      hostname: firstMessage.hostname,
       projectPath: projectPathOverride ?? firstMessage.cwd,
       fileHistorySnapshots: buildFileHistorySnapshotChain(
         fileHistorySnapshots,
@@ -4896,6 +5000,15 @@ async function readLiteMetadata(
   const teamName = extractJsonStringField(head, 'teamName')
   const agentSetting = extractJsonStringField(head, 'agentSetting')
 
+  // ORIGINAL machine → head only (tail would reflect the latest host after a
+  // cross-machine resume). Validated with the write-side predicate to discard
+  // string-scrape false positives from nested JSON in early lines.
+  const rawHostname = extractJsonStringField(head, 'hostname')
+  const hostname =
+    rawHostname && isRecordableSessionHostname(rawHostname)
+      ? rawHostname
+      : undefined
+
   // Prefer the last-prompt tail entry — captured by extractFirstPrompt at
   // write time (filtered, authoritative) and shows what the user was most
   // recently doing. Head scan is the fallback for sessions written before
@@ -4943,6 +5056,7 @@ async function readLiteMetadata(
   return {
     firstPrompt,
     gitBranch,
+    hostname,
     isSidechain,
     projectPath,
     teamName,
@@ -5175,6 +5289,7 @@ async function enrichLog(
     isLite: false,
     firstPrompt: meta.firstPrompt,
     gitBranch: meta.gitBranch,
+    hostname: meta.hostname,
     isSidechain: meta.isSidechain,
     teamName: meta.teamName,
     customTitle: meta.customTitle,

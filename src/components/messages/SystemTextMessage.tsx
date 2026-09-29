@@ -319,7 +319,6 @@ function TurnDurationMessage({
         : '';
     return `${showTurnDuration ? ' \u00B7 ' : ''}${usage}${nudges}`;
   })();
-
   const tokenSuffix = (() => {
     if (message.outputTokens === undefined) return '';
     const parts = [`${formatNumber(message.outputTokens)} output`];

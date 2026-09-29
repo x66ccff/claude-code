@@ -1,6 +1,7 @@
 import { feature } from 'bun:bundle';
 import chalk from 'chalk';
 import { SentryErrorBoundary } from './SentryErrorBoundary.js';
+import { ToolOutputExpansionContext } from './shell/ExpandShellOutputContext.js';
 import type { UUID } from 'crypto';
 import type { RefObject } from 'react';
 import * as React from 'react';
@@ -32,7 +33,7 @@ import { collapseReadSearchGroups } from '../utils/collapseReadSearch.js';
 import { collapseTeammateShutdowns } from '../utils/collapseTeammateShutdowns.js';
 import { getGlobalConfig } from '../utils/config.js';
 import { isEnvTruthy } from '../utils/envUtils.js';
-import { isFullscreenEnvEnabled } from '../utils/fullscreen.js';
+import { formatNumber, formatTimeHHMMSS } from '../utils/format.js';
 import { applyGrouping } from '../utils/groupToolUses.js';
 import {
   buildMessageLookups,
@@ -41,7 +42,6 @@ import {
   updateMessageLookupsIncremental,
   createAssistantMessage,
   deriveUUID,
-  getMessagesAfterCompactBoundary,
   getToolUseID,
   getToolUseIDs,
   hasUnresolvedHooksFromLookup,
@@ -117,6 +117,46 @@ const SEND_USER_FILE_TOOL_NAME: string | null = feature('KAIROS')
 
 /* eslint-enable @typescript-eslint/no-require-imports */
 import { VirtualMessageList } from './VirtualMessageList.js';
+
+// OUTPUT_STATS: gray per-response stats line rendered under the last
+// text-bearing assistant record of each API response. Merged single-line
+// format (user-specified): `14:23:05 · 用时 4.8s · ↓ 57 tokens · 61.6 tok/s`.
+// - timestamp: message.timestamp in fixed GMT+8 (formatTimeHHMMSS);
+// - 用时: endMs - requestStartMs (requestStartMs = start of the last API
+//   attempt, absent on older transcripts → fall back to endMs - firstDeltaMs);
+// - tokens: usage.output_tokens; tok/s: streamStats.tokensPerSec (attached in
+//   claude.ts at message_delta; absent on non-streaming fallbacks and
+//   sessions recorded before this feature existed).
+// Each segment degrades gracefully when its data is missing.
+function formatDurationCN(ms: number): string {
+  const s = ms / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s - m * 60);
+  return `${m}m ${rem}s`;
+}
+
+function formatAssistantStreamStats(msg: AssistantMessage): string | null {
+  const segments: string[] = [];
+  const rawTs = msg.timestamp;
+  const ts =
+    typeof rawTs === 'string' || typeof rawTs === 'number' || rawTs instanceof Date ? formatTimeHHMMSS(rawTs) : '';
+  if (ts) segments.push(ts);
+  const stats = msg.streamStats;
+  if (stats && stats.endMs > 0) {
+    const base = stats.requestStartMs && stats.requestStartMs > 0 ? stats.requestStartMs : stats.firstDeltaMs;
+    if (base > 0 && stats.endMs > base) segments.push(`用时 ${formatDurationCN(stats.endMs - base)}`);
+  }
+  const usage = msg.message?.usage as { output_tokens?: unknown } | undefined;
+  const outputTokens = usage?.output_tokens;
+  if (typeof outputTokens === 'number' && outputTokens > 0) {
+    segments.push(`↓ ${formatNumber(outputTokens)} tokens`);
+    if (stats && stats.tokensPerSec > 0) segments.push(`${stats.tokensPerSec.toFixed(1)} tok/s`);
+  }
+  if (segments.length === 0) return null;
+  return segments.join(' · ');
+}
 
 /**
  * In brief-only mode, filter messages to show ONLY Brief tool_use blocks,
@@ -543,12 +583,13 @@ const MessagesImpl = ({
     // (this PR's core goal — full history in UI, filter only for the model).
     // Also avoids a UUID mismatch: normalizeMessages derives new UUIDs, so
     // projectSnippedView's check against original removedUuids would fail.
-    const compactAwareMessages =
-      verbose || isFullscreenEnvEnabled()
-        ? normalizedMessages
-        : getMessagesAfterCompactBoundary(normalizedMessages, {
-            includeSnipped: true,
-          });
+    // Keep the full pre-compact history visible in every view (not just
+    // verbose/transcript). The model context is filtered separately in
+    // query.ts via getMessagesAfterCompactBoundary, so retaining the messages
+    // here only affects display: after /compact the user still sees the prior
+    // conversation (with the compact_boundary marker inline as the signal),
+    // while tokens are still freed from the API request.
+    const compactAwareMessages = normalizedMessages;
 
     const messagesToShowNotTruncated = reorderMessagesInUI(
       compactAwareMessages.filter(
@@ -690,6 +731,29 @@ const MessagesImpl = ({
     [streamingToolUses],
   );
 
+  // OUTPUT_STATS: one API response is split into multiple assistant records
+  // sharing the same message.id (one per content block). Render the stats
+  // line only under the LAST text-bearing record of each response id.
+  const streamStatsUuids = useMemo(() => {
+    const uuids = new Set<string>();
+    if (feature('OUTPUT_STATS')) {
+      const lastTextUuidByResponseId = new Map<string, string>();
+      for (const m of renderableMessages) {
+        if (m.type !== 'assistant') continue;
+        const content = m.message?.content;
+        const hasText = Array.isArray(content)
+          ? content.some(b => (b as { type?: string }).type === 'text')
+          : typeof content === 'string' && content.length > 0;
+        if (!hasText) continue;
+        const id = m.message?.id;
+        const responseId = typeof id === 'string' && id.length > 0 ? id : String(m.uuid);
+        lastTextUuidByResponseId.set(responseId, String(m.uuid));
+      }
+      for (const uuid of lastTextUuidByResponseId.values()) uuids.add(uuid);
+    }
+    return uuids;
+  }, [renderableMessages]);
+
   // Divider insertion point and selected index: combined into a single pass
   // over renderableMessages to avoid two separate findIndex traversals.
   const { dividerBeforeIndex, selectedIdx } = useMemo(() => {
@@ -801,6 +865,16 @@ const MessagesImpl = ({
     const DIFF_COLLAPSE_DISTANCE = 0;
     const shouldCollapseDiffs = renderableMessages.length - 1 - index > DIFF_COLLAPSE_DISTANCE;
 
+    // Pre-formatted stats string (not the raw stats object) so the
+    // areMessageRowPropsEqual comparator can detect the change when
+    // claude.ts mutates streamStats onto the message after streaming ends —
+    // mutation doesn't change the message reference, but this string does.
+    const streamStatsText = feature('OUTPUT_STATS')
+      ? msg.type === 'assistant' && streamStatsUuids.has(String(msg.uuid))
+        ? formatAssistantStreamStats(msg)
+        : null
+      : null;
+
     const k = messageKey(msg);
     const row = (
       <MessageRow
@@ -808,6 +882,7 @@ const MessagesImpl = ({
         message={msg}
         isUserContinuation={isUserContinuation}
         hasContentAfter={hasContentAfter}
+        streamStatsText={streamStatsText}
         tools={tools}
         commands={commands}
         verbose={verbose || isItemExpanded(msg) || (cursor?.expanded === true && index === selectedIdx)}
@@ -829,7 +904,9 @@ const MessagesImpl = ({
     // Wrapped BEFORE divider branch so both return paths get it.
     const wrapped = (
       <MessageActionsSelectedContext.Provider key={k} value={index === selectedIdx}>
-        {row}
+        <ToolOutputExpansionContext.Provider value={{ expanded: isItemExpanded(msg), toggle: () => onItemClick(msg) }}>
+          {row}
+        </ToolOutputExpansionContext.Provider>
       </MessageActionsSelectedContext.Provider>
     );
 

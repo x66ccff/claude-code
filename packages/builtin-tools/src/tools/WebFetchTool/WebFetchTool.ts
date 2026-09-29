@@ -6,6 +6,7 @@ import { lazySchema } from 'src/utils/lazySchema.js'
 import type { PermissionDecision } from 'src/utils/permissions/PermissionResult.js'
 import { getRuleByContentsForTool } from 'src/utils/permissions/permissions.js'
 import { getSettings_DEPRECATED } from 'src/utils/settings/settings.js'
+import { isTavilyConfigured } from '../shared/tavily.js'
 import { isPreapprovedHost } from './preapproved.js'
 import { DESCRIPTION, WEB_FETCH_TOOL_NAME } from './prompt.js'
 import {
@@ -213,11 +214,12 @@ ${DESCRIPTION}`
   ) {
     const start = Date.now()
 
-    // Select backend: settings.webFetchAdapter → default 'tavily'
+    // Select backend: settings.webFetchAdapter → default 'tavily' only when
+    // the user configured a Tavily endpoint/key, otherwise direct HTTP
+    // (no third-party relay).
     const settings = getSettings_DEPRECATED()
-    // Direct HTTP honors CLAUDE_CODE_WEB_FETCH_PROXY. Tavily remains an
-    // explicit opt-in through /web-tools.
-    const backend = settings.webFetchAdapter ?? 'http'
+    const backend =
+      settings.webFetchAdapter ?? (isTavilyConfigured() ? 'tavily' : 'http')
 
     // Tavily path: /extract returns Markdown directly — skip turndown + queryHaiku
     if (backend === 'tavily') {

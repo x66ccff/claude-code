@@ -1,6 +1,9 @@
 import { coerce, gte } from 'semver'
 import type { Writable } from 'stream'
-import { getClearTerminalSequence } from './clearTerminal.js'
+import {
+  getClearTerminalSequence,
+  getEraseViewportSequence,
+} from './clearTerminal.js'
 import type { Diff } from './frame.js'
 import { cursorMove, cursorTo, eraseLines } from './termio/csi.js'
 import { BSU, ESU, HIDE_CURSOR, SHOW_CURSOR } from './termio/dec.js'
@@ -160,9 +163,37 @@ const EXTENDED_KEYS_TERMINALS = [
   'windows-terminal',
 ]
 
+/** True when running inside a zellij pane (sets ZELLIJ / ZELLIJ_SESSION_NAME
+ *  in every pane; TERM_PROGRAM is inherited from the outer terminal, so it
+ *  cannot be used to detect the multiplexer). */
+export function isZellij(): boolean {
+  return (
+    process.env.ZELLIJ !== undefined ||
+    process.env.ZELLIJ_SESSION_NAME !== undefined
+  )
+}
+
 /** True if this terminal correctly handles extended key reporting
  *  (Kitty keyboard protocol + xterm modifyOtherKeys). */
 export function supportsExtendedKeys(): boolean {
+  // Never push extended key reporting inside zellij. The tmux entry above
+  // assumes the multiplexer "doesn't forward the kitty sequence to the outer
+  // terminal" — an assumption that is FALSE under zellij, whose kitty
+  // keyboard-protocol push/pop flag stack is buggy (zellij#4333, #3723, #3592,
+  // #4509). Two concrete failures result:
+  //   1. Under a genuinely kitty-capable outer terminal, the disambiguate flag
+  //      (CSI >1u) makes Ctrl+C arrive as CSI 99;5u instead of \x03, which
+  //      App.tsx's raw-string exit guard (`input === '\x03'`) doesn't
+  //      recognize — so Ctrl+C can't exit (fish-shell#10864 documents this
+  //      disambiguate behavior).
+  //   2. Repeated push/pop of the kitty stack across a long session (raw-mode
+  //      toggles, dialogs, suspend/resume) corrupts zellij's key decoding,
+  //      progressively dropping keystrokes ("type two chars, only one lands").
+  // TERM_PROGRAM (e.g. tmux, or iTerm.app/WezTerm/ghostty on macOS) is
+  // inherited through zellij and would otherwise wrongly enable extended keys.
+  if (isZellij()) {
+    return false
+  }
   return EXTENDED_KEYS_TERMINALS.includes(process.env.TERM_PROGRAM ?? '')
 }
 
@@ -179,6 +210,16 @@ export function hasCursorUpViewportYankBug(): boolean {
 // Computed once at module load — terminal capabilities don't change mid-session.
 // Exported so callers can pass a sync-skip hint gated to specific modes.
 export const SYNC_OUTPUT_SUPPORTED = isSynchronizedOutputSupported()
+
+// zellij honors DEC 2026 (verified 0.45.1) but silently ignores CSI T (SD)
+// inside DECSTBM margins — CSI S (SU) respects margins, CSI T with margins is
+// dropped entirely. The scroll-region fast path emits CSI T on every
+// scroll-up, so the pane grid never shifts while our screen model does:
+// cell-level mixed rows that persist, because subsequent diffs are computed
+// against the (wrong) shifted model. BSU/ESU stay enabled under zellij;
+// only the hardware-scroll fast path is disabled there — plain diff writes
+// render correctly.
+export const DECSTBM_SAFE = SYNC_OUTPUT_SUPPORTED && !isZellij()
 
 export type Terminal = {
   stdout: Writable
@@ -215,6 +256,11 @@ export function writeDiffToTerminal(
         break
       case 'clearTerminal':
         buffer += getClearTerminalSequence()
+        break
+      // [ccb mod] Degraded reset on terminals that ignore CSI 3J (zellij):
+      // erase viewport in place, no scrollback clear (see clearViewport).
+      case 'clearViewport':
+        buffer += getEraseViewportSequence()
         break
       case 'cursorHide':
         buffer += HIDE_CURSOR

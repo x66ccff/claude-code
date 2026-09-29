@@ -44,7 +44,7 @@ export default { isEnabled: () => false, isHidden: true, name: 'stub' };
 
 ---
 
-## 二、反编译调研结论（来源：`C:\Users\12180\.local\bin\claude.exe`）
+## 二、反编译调研结论（来源：`%USERPROFILE%\.local\bin\claude.exe`）
 
 `claude.exe` 是 242MB 的 Bun 原生编译产物（JS 源码 embed 在二进制内）。通过对该文件的字符串提取（`grep -aoE`）反推出完整调用链。
 
@@ -744,8 +744,8 @@ git branch -D feat/autofix-pr
 | 路径 | 角色 |
 |---|---|
 | `E:\Source_code\Claude-code-bast-autofix-pr` | 实施 worktree |
-| `C:\Users\12180\.local\bin\claude.exe` | 反编译来源（242MB Bun 编译产物） |
-| `C:\Users\12180\.claude\projects\E--Source-code-Claude-code-bast\memory\project_autofix_pr_implementation.md` | 内存备忘（精简版） |
+| `%USERPROFILE%\.local\bin\claude.exe` | 反编译来源（242MB Bun 编译产物） |
+| `%USERPROFILE%\.claude\projects\E--Source-code-Claude-code-bast\memory\project_autofix_pr_implementation.md` | 内存备忘（精简版） |
 | `src/commands/review/reviewRemote.ts` | 主模板 |
 | `src/utils/teleport.tsx:947` | `teleportToRemote` 入口 |
 | `src/tasks/RemoteAgentTask/RemoteAgentTask.tsx:103` | `REMOTE_TASK_TYPES` |

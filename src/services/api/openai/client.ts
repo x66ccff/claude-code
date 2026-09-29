@@ -2,6 +2,7 @@ import OpenAI from 'openai'
 import { openaiAdapter } from 'src/services/providerUsage/adapters/openai.js'
 import { updateProviderBuckets } from 'src/services/providerUsage/store.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
+import { wrapFetchForRawRequest } from '../rawRequestSnapshot.js'
 
 /**
  * Environment variables:
@@ -13,6 +14,7 @@ import { getProxyFetchOptions } from 'src/utils/proxy.js'
  */
 
 let cachedClient: OpenAI | null = null
+let cachedRawCaptureClient: OpenAI | null = null
 
 /**
  * Wrap a fetch so that every response's rate-limit headers are fed into the
@@ -37,22 +39,32 @@ function wrapFetchForUsage(base: typeof fetch): typeof fetch {
 }
 
 export function getOpenAIClient(options?: {
-  maxRetries?: number
   fetchOverride?: typeof fetch
   source?: string
+  captureRawRequest?: boolean
 }): OpenAI {
-  if (cachedClient) return cachedClient
+  if (!options?.fetchOverride) {
+    const cached = options?.captureRawRequest
+      ? cachedRawCaptureClient
+      : cachedClient
+    if (cached) return cached
+  }
 
   const apiKey = process.env.OPENAI_API_KEY || ''
   const baseURL = process.env.OPENAI_BASE_URL
 
   const baseFetch = options?.fetchOverride ?? (globalThis.fetch as typeof fetch)
-  const wrappedFetch = wrapFetchForUsage(baseFetch)
+  const requestFetch = options?.captureRawRequest
+    ? wrapFetchForRawRequest(baseFetch, 'openai')
+    : baseFetch
+  const wrappedFetch = wrapFetchForUsage(requestFetch)
 
   const client = new OpenAI({
     apiKey,
     ...(baseURL && { baseURL }),
-    maxRetries: options?.maxRetries ?? 0,
+    // SDK retries stay disabled: the unified rate-limit policy
+    // (rateLimitRetry.ts) owns the retry budget.
+    maxRetries: 0,
     timeout: parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10),
     dangerouslyAllowBrowser: true,
     ...(process.env.OPENAI_ORG_ID && {
@@ -66,7 +78,11 @@ export function getOpenAIClient(options?: {
   })
 
   if (!options?.fetchOverride) {
-    cachedClient = client
+    if (options?.captureRawRequest) {
+      cachedRawCaptureClient = client
+    } else {
+      cachedClient = client
+    }
   }
 
   return client
@@ -75,4 +91,5 @@ export function getOpenAIClient(options?: {
 /** Clear the cached client (useful when env vars change). */
 export function clearOpenAIClientCache(): void {
   cachedClient = null
+  cachedRawCaptureClient = null
 }

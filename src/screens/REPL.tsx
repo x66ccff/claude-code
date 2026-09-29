@@ -276,8 +276,11 @@ import { useMergedCommands } from '../hooks/useMergedCommands.js';
 import { useSkillsChange } from '../hooks/useSkillsChange.js';
 import { useManagePlugins } from '../hooks/useManagePlugins.js';
 import { Messages } from '../components/Messages.js';
+import { RawRequestView } from '../components/RawRequestView.js';
 import { TaskListV2 } from '../components/TaskListV2.js';
 import { TeammateViewHeader } from '../components/TeammateViewHeader.js';
+import { clearRawRequestSnapshot } from '../services/api/rawRequestSnapshot.js';
+import { shouldShowQuerySpinner } from './replSpinner.js';
 import { getPipeIpc } from '../utils/pipeTransport.js';
 import { useTasksV2WithCollapseEffect } from '../hooks/useTasksV2.js';
 import { maybeMarkProjectOnboardingComplete } from '../projectOnboardingState.js';
@@ -874,12 +877,14 @@ export function REPL({
     logForDebugging(`[REPL:mount] REPL mounted, disabled=${disabled}`);
     return () => logForDebugging(`[REPL:unmount] REPL unmounting`);
   }, [disabled]);
+  useEffect(() => clearRawRequestSnapshot, []);
 
   // Agent definition is state so /resume can update it mid-session
   const [mainThreadAgentDefinition, setMainThreadAgentDefinition] = useState(initialMainThreadAgentDefinition);
 
   const toolPermissionContext = useAppState(s => s.toolPermissionContext);
   const verbose = useAppState(s => s.verbose);
+  const rawRequestViewEnabled = useAppState(s => s.rawRequestViewEnabled);
   const mcp = useAppState(s => s.mcp);
   const plugins = useAppState(s => s.plugins);
   const agentDefinitions = useAppState(s => s.agentDefinitions);
@@ -1117,6 +1122,28 @@ export function REPL({
   const [streamingToolUses, setStreamingToolUses] = useState<StreamingToolUse[]>([]);
   const [streamingThinking, setStreamingThinking] = useState<StreamingThinking | null>(null);
 
+  // Live compaction summary text for the spinner marquee. Deltas arrive at
+  // high frequency, so they accumulate into a ref and flush to state on a
+  // ~120ms throttle (same spirit as responseLengthRef's ref-only updates,
+  // but the marquee needs re-renders, not a ref read).
+  const [compactStreamingText, setCompactStreamingText] = useState<string | null>(null);
+  const compactStreamingTextRef = useRef('');
+  const compactTextFlushPendingRef = useRef(false);
+  const appendCompactStreamingText = useCallback((text: string) => {
+    compactStreamingTextRef.current += text;
+    if (compactTextFlushPendingRef.current) return;
+    compactTextFlushPendingRef.current = true;
+    setTimeout(() => {
+      compactTextFlushPendingRef.current = false;
+      setCompactStreamingText(compactStreamingTextRef.current);
+    }, 120);
+  }, []);
+  const resetCompactStreamingText = useCallback(() => {
+    compactStreamingTextRef.current = '';
+    compactTextFlushPendingRef.current = false;
+    setCompactStreamingText(null);
+  }, []);
+
   // Auto-hide streaming thinking after 30 seconds of being completed
   useEffect(() => {
     if (streamingThinking && !streamingThinking.isStreaming && streamingThinking.streamingEndedAt) {
@@ -1255,6 +1282,8 @@ export function REPL({
   // Used to compute total elapsed time (including teammate execution) for the deferred message
   const swarmStartTimeRef = React.useRef<number | null>(null);
   const swarmBudgetInfoRef = React.useRef<{ tokens: number; limit: number; nudges: number } | undefined>(undefined);
+  // Accumulated token stats across deferred swarm turns (OUTPUT_STATS) —
+  // consumed by the deferred turn-duration message once teammates finish.
   const swarmTokenStatsRef = React.useRef<
     | {
         outputTokens: number;
@@ -1263,6 +1292,8 @@ export function REPL({
       }
     | undefined
   >(undefined);
+  // Index into messagesRef where the current turn's messages start — used to
+  // slice this turn's messages for thinking-token summarization.
   const turnMessageStartIndexRef = React.useRef(0);
 
   // Ref to track current focusedInputDialog for use in callbacks
@@ -1759,6 +1790,9 @@ export function REPL({
   // Ref instead of state to avoid triggering React re-renders on every
   // streaming text_delta. The spinner reads this via its animation timer.
   const responseLengthRef = useRef(0);
+  const compactProgressActiveRef = useRef(false);
+  // Invalidates callbacks captured before cancellation or turn completion.
+  const compactGenRef = useRef(0);
   // API performance metrics ref for ant-only spinner display (TTFT/OTPS).
   // Accumulates metrics from all API requests in a turn for P50 aggregation.
   const apiMetricsRef = useRef<
@@ -1812,6 +1846,18 @@ export function REPL({
   const visibleStreamingText =
     streamingText && showStreamingText ? streamingText.substring(0, streamingText.lastIndexOf('\n') + 1) || null : null;
 
+  // Sticky formatted tool-call marquee source. streamingToolUses is cleared at
+  // message_stop (before the tool actually executes), but the marquee should
+  // keep showing which tool call is running during 'tool-use' mode, so retain
+  // the last formatted value until turn reset (resetLoadingState). The render-
+  // body write is idempotent (same state → same value), matching the existing
+  // responseLengthRef-style ref patterns in this component.
+  const toolMarqueeTextRef = useRef<string | null>(null);
+  const lastStreamingToolUse = streamingToolUses.length > 0 ? streamingToolUses[streamingToolUses.length - 1] : null;
+  if (lastStreamingToolUse) {
+    toolMarqueeTextRef.current = `${lastStreamingToolUse.contentBlock.name} ${lastStreamingToolUse.unparsedToolInput}`;
+  }
+
   const [lastQueryCompletionTime, setLastQueryCompletionTime] = useState(0);
   const [spinnerMessage, setSpinnerMessage] = useState<string | null>(null);
   const [spinnerColor, setSpinnerColor] = useState<keyof Theme | null>(null);
@@ -1844,9 +1890,13 @@ export function REPL({
   const [contentReplacementStateRef] = useState(() => ({
     current: provisionContentReplacementState(initialMessages, initialContentReplacements),
   }));
-  registerCompactCleanup(() => {
-    contentReplacementStateRef.current = createContentReplacementState();
-  });
+  useEffect(
+    () =>
+      registerCompactCleanup(() => {
+        contentReplacementStateRef.current = createContentReplacementState();
+      }),
+    [contentReplacementStateRef],
+  );
 
   const [haveShownCostDialog, setHaveShownCostDialog] = useState(getGlobalConfig().hasAcknowledgedCostThreshold);
   const [vimMode, setVimMode] = useState<VimMode>('INSERT');
@@ -1917,16 +1967,22 @@ export function REPL({
     apiMetricsRef.current = [];
     setStreamingText(null);
     setStreamingToolUses([]);
+    toolMarqueeTextRef.current = null;
     setSpinnerMessage(null);
     setSpinnerColor(null);
     setSpinnerShimmerColor(null);
+    compactGenRef.current++;
+    compactProgressActiveRef.current = false;
+    if (feature('THINKING_MARQUEE')) {
+      resetCompactStreamingText();
+    }
     pickNewSpinnerTip();
     endInteractionSpan();
     // Speculative bash classifier checks are only valid for the current
     // turn's commands — clear after each turn to avoid accumulating
     // Promise chains for unconsumed checks (denied/aborted paths).
     clearSpeculativeChecks();
-  }, [pickNewSpinnerTip]);
+  }, [pickNewSpinnerTip, resetCompactStreamingText]);
 
   // Session backgrounding — hook is below, after getToolUseContext
 
@@ -2044,26 +2100,14 @@ export function REPL({
     setToolJSX,
   });
 
-  const showSpinner =
-    (!toolJSX || toolJSX.showSpinner === true) &&
-    toolUseConfirmQueue.length === 0 &&
-    promptQueue.length === 0 &&
-    // Show spinner during input processing, API call, while teammates are running,
-    // or while pending task notifications are queued (prevents spinner bounce between consecutive notifications)
-    (isLoading ||
-      userInputOnProcessing ||
-      hasRunningTeammates ||
-      // Keep spinner visible while task notifications are queued for processing.
-      // Without this, the spinner briefly disappears between consecutive notifications
-      // (e.g., multiple background agents completing in rapid succession) because
-      // isLoading goes false momentarily between processing each one.
-      getCommandQueueLength() > 0) &&
-    // Hide spinner when waiting for leader to approve permission request
-    !pendingWorkerRequest &&
-    !onlySleepToolActive &&
-    // Hide spinner when streaming text is visible (the text IS the feedback),
-    // but keep it when isBriefOnly suppresses the streaming text display
-    (!visibleStreamingText || isBriefOnly);
+  const showSpinner = shouldShowQuerySpinner({
+    toolJSXAllowsSpinner: !toolJSX || toolJSX.showSpinner === true,
+    hasToolUseConfirm: toolUseConfirmQueue.length > 0,
+    hasPrompt: promptQueue.length > 0,
+    hasActiveWork: isLoading || !!userInputOnProcessing || hasRunningTeammates || getCommandQueueLength() > 0,
+    pendingWorkerApproval: !!pendingWorkerRequest,
+    onlySleepToolActive,
+  });
 
   // Check if any permission or ask question prompt is currently visible
   // This is used to prevent the survey from opening while prompts are active
@@ -2622,6 +2666,7 @@ export function REPL({
     }
 
     resetLoadingState();
+    setStreamingThinking(null);
 
     // Clear any active token budget so the backstop doesn't fire on
     // a stale budget if the query generator hasn't exited yet.
@@ -2916,6 +2961,7 @@ export function REPL({
       // render between turns); decouples freshness from React's render cycle for
       // a future headless conversation loop. Same pattern refreshTools() uses.
       const s = store.getState();
+      const compactGeneration = compactGenRef.current;
 
       // Compute tools fresh from store.getState() rather than the closure-
       // captured `tools`. useManageMCPConnections populates appState.mcp
@@ -3009,6 +3055,12 @@ export function REPL({
             : undefined,
         setStreamMode,
         onCompactProgress: event => {
+          if (
+            compactGeneration !== compactGenRef.current ||
+            (abortController.signal.aborted && event.type !== 'compact_end')
+          ) {
+            return;
+          }
           switch (event.type) {
             case 'hooks_start':
               setSpinnerColor('claudeBlue_FOR_SYSTEM_SPINNER');
@@ -3023,11 +3075,25 @@ export function REPL({
               break;
             case 'compact_start':
               setSpinnerMessage('Compacting conversation');
+              compactProgressActiveRef.current = true;
+              setStreamingThinking(null);
+              if (feature('THINKING_MARQUEE')) {
+                resetCompactStreamingText();
+              }
               break;
             case 'compact_end':
               setSpinnerMessage(null);
               setSpinnerColor(null);
               setSpinnerShimmerColor(null);
+              compactProgressActiveRef.current = false;
+              if (feature('THINKING_MARQUEE')) {
+                resetCompactStreamingText();
+              }
+              break;
+            case 'compact_text_delta':
+              if (feature('THINKING_MARQUEE') && compactProgressActiveRef.current && event.source === 'compact') {
+                appendCompactStreamingText(event.text);
+              }
               break;
           }
         },
@@ -3160,6 +3226,10 @@ export function REPL({
 
   const onQueryEvent = useCallback(
     (event: Parameters<typeof handleMessageFromStream>[0]) => {
+      if (event.type === 'stream_event' && (event.event as { type?: string } | undefined)?.type === 'message_stop') {
+        // Final usage is written back in place; memoized consumers need a fresh array.
+        setMessages(messages => [...messages]);
+      }
       handleMessageFromStream(
         event,
         newMessage => {
@@ -5940,33 +6010,37 @@ export function REPL({
           scrollable={
             <>
               <TeammateViewHeader />
-              <Messages
-                messages={displayedMessages}
-                tools={tools}
-                commands={commands}
-                verbose={verbose}
-                toolJSX={toolJSX}
-                toolUseConfirmQueue={toolUseConfirmQueue}
-                inProgressToolUseIDs={
-                  viewedTeammateTask ? (viewedTeammateTask.inProgressToolUseIDs ?? new Set()) : inProgressToolUseIDs
-                }
-                isMessageSelectorVisible={isMessageSelectorVisible}
-                conversationId={conversationId}
-                screen={screen}
-                streamingToolUses={streamingToolUses}
-                showAllInTranscript={showAllInTranscript}
-                agentDefinitions={agentDefinitions}
-                onOpenRateLimitOptions={handleOpenRateLimitOptions}
-                isLoading={isLoading}
-                streamingText={isLoading && !viewedAgentTask ? visibleStreamingText : null}
-                isBriefOnly={viewedAgentTask ? false : isBriefOnly}
-                unseenDivider={viewedAgentTask ? undefined : unseenDivider}
-                scrollRef={isFullscreenEnvEnabled() ? scrollRef : undefined}
-                trackStickyPrompt={isFullscreenEnvEnabled() ? true : undefined}
-                cursor={cursor}
-                setCursor={setCursor}
-                cursorNavRef={cursorNavRef}
-              />
+              {rawRequestViewEnabled ? (
+                <RawRequestView messages={displayedMessages} verbose={verbose} />
+              ) : (
+                <Messages
+                  messages={displayedMessages}
+                  tools={tools}
+                  commands={commands}
+                  verbose={verbose}
+                  toolJSX={toolJSX}
+                  toolUseConfirmQueue={toolUseConfirmQueue}
+                  inProgressToolUseIDs={
+                    viewedTeammateTask ? (viewedTeammateTask.inProgressToolUseIDs ?? new Set()) : inProgressToolUseIDs
+                  }
+                  isMessageSelectorVisible={isMessageSelectorVisible}
+                  conversationId={conversationId}
+                  screen={screen}
+                  streamingToolUses={streamingToolUses}
+                  showAllInTranscript={showAllInTranscript}
+                  agentDefinitions={agentDefinitions}
+                  onOpenRateLimitOptions={handleOpenRateLimitOptions}
+                  isLoading={isLoading}
+                  streamingText={isLoading && !viewedAgentTask ? visibleStreamingText : null}
+                  isBriefOnly={viewedAgentTask ? false : isBriefOnly}
+                  unseenDivider={viewedAgentTask ? undefined : unseenDivider}
+                  scrollRef={isFullscreenEnvEnabled() ? scrollRef : undefined}
+                  trackStickyPrompt={isFullscreenEnvEnabled() ? true : undefined}
+                  cursor={cursor}
+                  setCursor={setCursor}
+                  cursorNavRef={cursorNavRef}
+                />
+              )}
               <AwsAuthStatusBox />
               {/* Hide the processing placeholder while a modal is showing —
                   it would sit at the last visible transcript row right above
@@ -5990,6 +6064,7 @@ export function REPL({
                   spinnerTip={spinnerTip}
                   responseLengthRef={responseLengthRef}
                   apiMetricsRef={apiMetricsRef}
+                  compactProgressActiveRef={compactProgressActiveRef}
                   overrideMessage={spinnerMessage}
                   spinnerSuffix={stopHookSpinnerSuffix}
                   verbose={verbose}
@@ -6000,6 +6075,10 @@ export function REPL({
                   overrideShimmerColor={spinnerShimmerColor}
                   hasActiveTools={inProgressToolUseIDs.size > 0}
                   leaderIsIdle={!isLoading}
+                  streamingThinking={feature('THINKING_MARQUEE') ? streamingThinking : null}
+                  compactStreamingText={feature('THINKING_MARQUEE') ? compactStreamingText : null}
+                  streamingOutputText={feature('THINKING_MARQUEE') ? streamingText : null}
+                  toolMarqueeText={feature('THINKING_MARQUEE') ? toolMarqueeTextRef.current : null}
                 />
               )}
               {!showSpinner &&

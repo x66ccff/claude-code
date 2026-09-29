@@ -1,10 +1,8 @@
 import figures from 'figures';
-import { homedir } from 'os';
 import { Box, Text } from '@anthropic/ink';
 import type { Step } from '../../projectOnboardingState.js';
 import { formatCreditAmount, getCachedReferrerReward } from '../../services/api/referral.js';
 import type { LogOption } from '../../types/logs.js';
-import { getCwd } from '../../utils/cwd.js';
 import { formatRelativeTimeAgo } from '../../utils/format.js';
 import type { FeedConfig, FeedLine } from './Feed.js';
 
@@ -67,17 +65,6 @@ export function createProjectOnboardingFeed(steps: Step[]): FeedConfig {
       text: `${checkmark}${text}`,
     };
   });
-
-  const warningText =
-    getCwd() === homedir()
-      ? 'Note: You have launched claude in your home directory. For the best experience, launch it in a project directory instead.'
-      : undefined;
-
-  if (warningText) {
-    lines.push({
-      text: warningText,
-    });
-  }
 
   return {
     title: 'Tips for getting started',

@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { AgentAdapterRegistry } from '../agentAdapter.js'
 import { createEngineContext } from '../engine/context.js'
 import { maxConcurrency, Semaphore } from '../engine/concurrency.js'
@@ -14,11 +14,34 @@ import type {
   ProgressEvent,
 } from '../types.js'
 
+// [agent-error-backoff patch] Keep transient-failure retries instant and deterministic in tests:
+// backoff base 0 (no real sleeping) while leaving the retry COUNT at its production default (5), so
+// the "exhausts retries" assertions exercise the real 6-attempt path. Save/restore because env is
+// process-global and bun runs every test file in one process (would otherwise leak to other files).
+let savedErrorBackoff: string | undefined
+beforeAll(() => {
+  savedErrorBackoff = process.env.CCB_AGENT_ERROR_BACKOFF_MS
+  process.env.CCB_AGENT_ERROR_BACKOFF_MS = '0'
+})
+afterAll(() => {
+  if (savedErrorBackoff === undefined)
+    delete process.env.CCB_AGENT_ERROR_BACKOFF_MS
+  else process.env.CCB_AGENT_ERROR_BACKOFF_MS = savedErrorBackoff
+})
+
+const STRUCTURED_SCHEMA = {
+  type: 'object',
+  required: ['count'],
+  properties: { count: { type: 'number' } },
+  additionalProperties: false,
+}
+
 type CtxOverrides = Partial<{
   agentResults: Map<string, AgentRunResult>
   runner: (params: AgentRunParams) => Promise<AgentRunResult>
   pending: { kind: 'skip' | 'retry' } | null
   journal: JournalEntry[]
+  appended: JournalEntry[]
   budgetTotal: number | null
   signal: AbortSignal
   truncated: string[]
@@ -67,7 +90,9 @@ function buildCtx(overrides: CtxOverrides = {}): {
     },
     journalStore: {
       read: async () => [],
-      append: async () => {},
+      append: async (_id: string, entry: JournalEntry) => {
+        overrides.appended?.push(entry)
+      },
       truncate: async (id: string) => {
         overrides.truncated?.push(id)
       },
@@ -123,8 +148,10 @@ test('agent dead → null', async () => {
   expect(await hooks.agent('hi')).toBeNull()
 })
 
-// Retry: dead or non-abort throw both get one retry chance; WorkflowAbortedError (kill) is not retried.
-// Retry still fails: dead stays dead; throw degrades to dead (does not break the workflow, hooks.agent returns null).
+// [agent-error-backoff patch] Retry: transient failures (non-abort throw / dead without a content
+// reason) get exponential-backoff retries up to CCB_AGENT_ERROR_MAX_RETRIES (default 5 → 6 attempts);
+// WorkflowAbortedError (kill) is never retried. Retries exhausted: dead stays dead, throw degrades to
+// dead (does not break the workflow — hooks.agent returns null). Backoff base is 0 in this file (instant).
 test('agent dead → retry once succeeds → ok', async () => {
   let calls = 0
   const { hooks } = buildCtx({
@@ -143,7 +170,7 @@ test('agent dead → retry once succeeds → ok', async () => {
   expect(calls).toBe(2)
 })
 
-test('agent dead → retry still dead → final null (dead stays dead)', async () => {
+test('agent dead (transient) → exhausts 5 backoff retries → final null after 6 attempts', async () => {
   let calls = 0
   const { hooks } = buildCtx({
     runner: async () => {
@@ -153,7 +180,28 @@ test('agent dead → retry still dead → final null (dead stays dead)', async (
     loggerWarn: () => {},
   })
   expect(await hooks.agent('p')).toBeNull()
-  expect(calls).toBe(2)
+  // dead without a content reason is transient → 1 initial + 5 backoff retries (default cap), instant in tests.
+  expect(calls).toBe(6)
+})
+
+test('agent dead then throws (transient) → exhausts retries → final runagent-threw', async () => {
+  let calls = 0
+  const { ctx, hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      if (calls === 1) return { kind: 'dead' as const }
+      throw new Error('retry failed')
+    },
+    loggerWarn: () => {},
+  })
+
+  expect(await hooks.agent('p')).toBeNull()
+  // both the dead and the throw are transient → 6 attempts total; last attempt threw → runagent-threw.
+  expect(calls).toBe(6)
+  const final = ctx.journal[0]!.result
+  expect(final.kind === 'dead' ? final.reason : undefined).toBe(
+    'runagent-threw',
+  )
 })
 
 test('agent non-abort throw → retry once succeeds → ok', async () => {
@@ -174,7 +222,7 @@ test('agent non-abort throw → retry once succeeds → ok', async () => {
   expect(calls).toBe(2)
 })
 
-test('agent non-abort throw → retry still throws → degrade to dead (returns null, does not break workflow)', async () => {
+test('agent non-abort throw (transient) → exhausts 5 backoff retries → degrade to dead after 6 attempts', async () => {
   let calls = 0
   const { hooks } = buildCtx({
     runner: async () => {
@@ -184,7 +232,52 @@ test('agent non-abort throw → retry still throws → degrade to dead (returns 
     loggerWarn: () => {},
   })
   expect(await hooks.agent('p')).toBeNull()
-  expect(calls).toBe(2)
+  expect(calls).toBe(6)
+})
+
+test('agent transient throw → recovers on the 4th backoff retry → ok (does not give up early)', async () => {
+  let calls = 0
+  const { hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      if (calls < 5) throw new Error('flaky api')
+      return {
+        kind: 'ok' as const,
+        output: 'recovered-late',
+        usage: { outputTokens: 4 },
+      }
+    },
+    loggerWarn: () => {},
+  })
+  expect(await hooks.agent('p')).toBe('recovered-late')
+  // 4 transient failures (each retried) + success on the 5th attempt — proves the budget is not 1.
+  expect(calls).toBe(5)
+})
+
+test('agent transient backoff wait is abortable → kill during backoff throws WorkflowAbortedError', async () => {
+  // Use a real (non-zero) backoff so the engine actually parks in abortableDelay, then abort mid-wait.
+  const prevBackoff = process.env.CCB_AGENT_ERROR_BACKOFF_MS
+  process.env.CCB_AGENT_ERROR_BACKOFF_MS = '5000'
+  const ac = new AbortController()
+  let calls = 0
+  const { hooks } = buildCtx({
+    signal: ac.signal,
+    runner: async () => {
+      calls++
+      // Abort while the engine is parked in the backoff wait that follows this failure.
+      if (calls === 1) setTimeout(() => ac.abort(), 10)
+      throw new Error('transient api error')
+    },
+    loggerWarn: () => {},
+  })
+  try {
+    await expect(hooks.agent('p')).rejects.toBeInstanceOf(WorkflowAbortedError)
+    // Aborted during the first backoff wait → never reached a second backend attempt.
+    expect(calls).toBe(1)
+  } finally {
+    if (prevBackoff === undefined) delete process.env.CCB_AGENT_ERROR_BACKOFF_MS
+    else process.env.CCB_AGENT_ERROR_BACKOFF_MS = prevBackoff
+  }
 })
 
 test('agent throw WorkflowAbortedError → no retry, rethrow directly (kill does not allow retry)', async () => {
@@ -225,6 +318,177 @@ test('agent skipped → no retry (user actively skips, no retry)', async () => {
   })
   expect(await hooks.agent('p')).toBeNull()
   expect(calls).toBe(1)
+})
+
+test('structured output invalid once → retry succeeds → only valid output is charged and journaled', async () => {
+  let calls = 0
+  const { ctx, hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      return calls === 1
+        ? {
+            kind: 'ok' as const,
+            output: { count: 'wrong' },
+            usage: { outputTokens: 99 },
+          }
+        : {
+            kind: 'ok' as const,
+            output: { count: 2 },
+            usage: { outputTokens: 3 },
+          }
+    },
+    loggerWarn: () => {},
+  })
+
+  expect(await hooks.agent('p', { schema: STRUCTURED_SCHEMA })).toEqual({
+    count: 2,
+  })
+  expect(calls).toBe(2)
+  expect(ctx.resources.budget.spent()).toBe(3)
+  expect(ctx.journal).toHaveLength(1)
+  expect(ctx.journal[0]!.result).toEqual({
+    kind: 'ok',
+    output: { count: 2 },
+    usage: { outputTokens: 3 },
+  })
+})
+
+test('valid structured output succeeds on the first attempt without retry', async () => {
+  let calls = 0
+  const { hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      return {
+        kind: 'ok' as const,
+        output: { count: 1 },
+        usage: { outputTokens: 2 },
+      }
+    },
+  })
+
+  expect(await hooks.agent('p', { schema: STRUCTURED_SCHEMA })).toEqual({
+    count: 1,
+  })
+  expect(calls).toBe(1)
+})
+
+test('structured output invalid twice → final dead is journaled without charging tokens', async () => {
+  let calls = 0
+  const appended: JournalEntry[] = []
+  const { ctx, events, hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      return {
+        kind: 'ok' as const,
+        output: { count: 'wrong' },
+        usage: { outputTokens: 99 },
+      }
+    },
+    appended,
+    loggerWarn: () => {},
+  })
+
+  expect(await hooks.agent('p', { schema: STRUCTURED_SCHEMA })).toBeNull()
+  expect(calls).toBe(2)
+  expect(ctx.resources.budget.spent()).toBe(0)
+  expect(ctx.journal).toHaveLength(1)
+  const final = ctx.journal[0]!.result
+  expect(final.kind).toBe('dead')
+  expect(final.kind === 'dead' ? final.reason : undefined).toBe(
+    'invalid-structured-output',
+  )
+  expect(final.kind === 'dead' ? final.detail : undefined).toBe(
+    '/count must be number',
+  )
+  expect(appended).toHaveLength(1)
+  expect(appended[0]!.result).toEqual(final)
+  expect(
+    events.some(
+      event =>
+        event.type === 'agent_done' &&
+        event.result.kind === 'dead' &&
+        event.result.reason === 'invalid-structured-output',
+    ),
+  ).toBe(true)
+})
+
+test('invalid JSON Schema fails before backend execution and is not retried or journaled', async () => {
+  let calls = 0
+  const { ctx, events, hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      return { kind: 'ok', output: {}, usage: { outputTokens: 1 } }
+    },
+  })
+
+  await expect(
+    hooks.agent('p', {
+      schema: { type: 'definitely-not-a-json-schema-type' },
+    }),
+  ).rejects.toThrow(/schema/i)
+  expect(calls).toBe(0)
+  expect(ctx.journal).toHaveLength(0)
+  expect(events.some(event => event.type === 'agent_started')).toBe(false)
+})
+
+// [agent-error-backoff patch] The two retry budgets are INDEPENDENT: a content failure (wrong output
+// shape) consumes only the single content retry, and a transient failure (throw / API error) consumes
+// only the backoff budget. Neither eats into the other, so a content miss followed by a transient blip
+// still recovers (and vice versa) instead of dying after one shared retry as the old code did.
+test('content failure then transient failure → independent budgets → recovers', async () => {
+  let calls = 0
+  const { hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      if (calls === 1)
+        return {
+          kind: 'ok' as const,
+          output: { count: 'wrong' },
+          usage: { outputTokens: 1 },
+        }
+      if (calls === 2) throw new Error('transient api error')
+      return {
+        kind: 'ok' as const,
+        output: { count: 7 },
+        usage: { outputTokens: 2 },
+      }
+    },
+    loggerWarn: () => {},
+  })
+
+  expect(await hooks.agent('p', { schema: STRUCTURED_SCHEMA })).toEqual({
+    count: 7,
+  })
+  // attempt1 content (immediate retry) + attempt2 transient (backoff retry) + attempt3 ok.
+  expect(calls).toBe(3)
+})
+
+test('transient failure then content failure → independent budgets → recovers', async () => {
+  let calls = 0
+  const { hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      if (calls === 1) throw new Error('transient api error')
+      if (calls === 2)
+        return {
+          kind: 'ok' as const,
+          output: { count: 'wrong' },
+          usage: { outputTokens: 1 },
+        }
+      return {
+        kind: 'ok' as const,
+        output: { count: 9 },
+        usage: { outputTokens: 2 },
+      }
+    },
+    loggerWarn: () => {},
+  })
+
+  expect(await hooks.agent('p', { schema: STRUCTURED_SCHEMA })).toEqual({
+    count: 9,
+  })
+  // attempt1 transient (backoff retry) + attempt2 content (immediate retry) + attempt3 ok.
+  expect(calls).toBe(3)
 })
 
 test('agent journal hit does not call runner', async () => {
@@ -280,6 +544,125 @@ test('agent journal hit does not call runner', async () => {
   expect(called).toBe(0)
 })
 
+test('valid structured output journal hit is revalidated and skips runner', async () => {
+  let calls = 0
+  const params: AgentRunParams = {
+    prompt: 'p',
+    schema: STRUCTURED_SCHEMA,
+  }
+  const { hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      return {
+        kind: 'ok',
+        output: { count: 2 },
+        usage: { outputTokens: 1 },
+      }
+    },
+    journal: [
+      {
+        key: agentCallKey('p', params),
+        seq: 0,
+        result: {
+          kind: 'ok',
+          output: { count: 1 },
+          usage: { outputTokens: 1 },
+        },
+      },
+    ],
+  })
+
+  expect(await hooks.agent('p', { schema: STRUCTURED_SCHEMA })).toEqual({
+    count: 1,
+  })
+  expect(calls).toBe(0)
+})
+
+test('invalid legacy structured output journal hit is invalidated and rerun live', async () => {
+  let calls = 0
+  const truncated: string[] = []
+  const warnings: string[] = []
+  const params: AgentRunParams = {
+    prompt: 'p',
+    schema: STRUCTURED_SCHEMA,
+  }
+  const { ctx, hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      return {
+        kind: 'ok',
+        output: { count: 2 },
+        usage: { outputTokens: 1 },
+      }
+    },
+    journal: [
+      {
+        key: agentCallKey('p', params),
+        seq: 0,
+        result: {
+          kind: 'ok',
+          output: { count: 'stale-invalid' },
+          usage: { outputTokens: 10 },
+        },
+      },
+    ],
+    truncated,
+    loggerWarn: message => {
+      warnings.push(message)
+    },
+  })
+
+  expect(await hooks.agent('p', { schema: STRUCTURED_SCHEMA })).toEqual({
+    count: 2,
+  })
+  expect(calls).toBe(1)
+  expect(truncated).toEqual(['r1'])
+  expect(ctx.journalInvalidated).toBe(true)
+  expect(
+    warnings.some(message =>
+      message.includes('does not match its structured output schema'),
+    ),
+  ).toBe(true)
+  expect(ctx.journal).toHaveLength(1)
+  expect(ctx.journal[0]!.result).toEqual({
+    kind: 'ok',
+    output: { count: 2 },
+    usage: { outputTokens: 1 },
+  })
+})
+
+test('journaled invalid-structured-output dead replays null without rerunning', async () => {
+  let calls = 0
+  const params: AgentRunParams = {
+    prompt: 'p',
+    schema: STRUCTURED_SCHEMA,
+  }
+  const { hooks } = buildCtx({
+    runner: async () => {
+      calls++
+      return {
+        kind: 'ok',
+        output: { count: 2 },
+        usage: { outputTokens: 1 },
+      }
+    },
+    journal: [
+      {
+        key: agentCallKey('p', params),
+        seq: 0,
+        result: {
+          kind: 'dead',
+          reason: 'invalid-structured-output',
+          detail: "must have required property 'count'",
+        },
+      },
+    ],
+  })
+
+  expect(await hooks.agent('p', { schema: STRUCTURED_SCHEMA })).toBeNull()
+  expect(calls).toBe(0)
+})
+
 test('agent exceeding total cap throws', async () => {
   const { hooks, ctx } = buildCtx()
   ctx.resources.agentCountBox.value = 1000
@@ -312,6 +695,17 @@ test('parallel single item throws → logger.warn records the failure reason', a
   expect(warns[0]).toMatch(/boom-x/)
 })
 
+test('parallel rethrows workflow cancellation instead of converting it to null', async () => {
+  const { hooks } = buildCtx()
+  await expect(
+    hooks.parallel([
+      async () => {
+        throw new WorkflowAbortedError()
+      },
+    ]),
+  ).rejects.toBeInstanceOf(WorkflowAbortedError)
+})
+
 test('pipeline chains stage by stage, stage throws → null', async () => {
   const { hooks } = buildCtx()
   const out = await hooks.pipeline(
@@ -338,6 +732,15 @@ test('pipeline stage throws → logger.warn records the failure reason', async (
   )
   expect(warns.length).toBe(1)
   expect(warns[0]).toMatch(/stage-boom/)
+})
+
+test('pipeline rethrows workflow cancellation instead of converting it to null', async () => {
+  const { hooks } = buildCtx()
+  await expect(
+    hooks.pipeline([1], async () => {
+      throw new WorkflowAbortedError()
+    }),
+  ).rejects.toBeInstanceOf(WorkflowAbortedError)
 })
 
 test('pipeline over 4096 throws', async () => {
@@ -528,6 +931,45 @@ test('agentAdapterRegistry takes priority over agentRunner (dispatched to adapte
   })
   expect(await hooks.agent('x')).toBe('from-adapter')
   expect(called).toEqual(['adapter'])
+})
+
+test('agentAdapterRegistry result is validated at the same engine boundary', async () => {
+  let adapterCalls = 0
+  let runnerCalls = 0
+  const registry = new AgentAdapterRegistry()
+    .register({
+      id: 'ad',
+      capabilities: { structuredOutput: true },
+      async run() {
+        adapterCalls++
+        return {
+          kind: 'ok',
+          output: { count: 'wrong' },
+          usage: { outputTokens: 1 },
+        }
+      },
+    })
+    .default('ad')
+  const { ctx, hooks } = buildCtx({
+    agentAdapterRegistry: registry,
+    runner: async () => {
+      runnerCalls++
+      return {
+        kind: 'ok',
+        output: { count: 1 },
+        usage: { outputTokens: 1 },
+      }
+    },
+    loggerWarn: () => {},
+  })
+
+  expect(await hooks.agent('p', { schema: STRUCTURED_SCHEMA })).toBeNull()
+  expect(adapterCalls).toBe(2)
+  expect(runnerCalls).toBe(0)
+  const final = ctx.journal[0]!.result
+  expect(final.kind === 'dead' ? final.reason : undefined).toBe(
+    'invalid-structured-output',
+  )
 })
 
 test('agentAdapterRegistry resolve throws → agent rethrows (workflow failed)', async () => {

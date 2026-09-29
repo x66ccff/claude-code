@@ -54,7 +54,8 @@ const result = Bun.spawnSync(
     cliPath,
     ...process.argv.slice(2),
   ],
-  { stdio: ['inherit', 'inherit', 'inherit'], cwd: projectRoot },
+  // 工作目录使用启动时所在目录（而非强制项目根），便于在任意目录用 ccb 启动
+  { stdio: ['inherit', 'inherit', 'inherit'], cwd: process.cwd() },
 )
 
 process.exit(result.exitCode ?? 0)

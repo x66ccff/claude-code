@@ -353,6 +353,7 @@ export type AsyncHookResponseAttachment = {
 }
 
 export type HookAttachment =
+  | HookExecutionAttachment
   | HookCancelledAttachment
   | {
       type: 'hook_blocking_error'
@@ -394,6 +395,23 @@ export type HookSystemMessageAttachment = {
   hookName: string
   toolUseID: string
   hookEvent: HookEvent
+}
+
+export type HookExecutionAttachment = {
+  type: 'hook_execution'
+  hookId: string
+  hookName: string
+  toolUseID: string
+  hookEvent: HookEvent
+  hookSource: string
+  hookType: 'command' | 'prompt' | 'agent' | 'http' | 'callback' | 'function'
+  outcome: 'success' | 'blocking' | 'error' | 'cancelled' | 'rejected'
+  durationMs: number
+  displayInput?: string
+  stdout?: string
+  stderr?: string
+  exitCode?: number
+  suppressOutput?: boolean
 }
 
 export type HookCancelledAttachment = {

@@ -50,3 +50,20 @@ and add only a license or notice that you are legally entitled to apply.
 
 The public export excludes npm/release workflows that rely on repository
 secrets. Generic CI and the public safety audit remain enabled.
+
+## Reviewing a prepared update
+
+Work on a separate branch of the public repository. Preserve its export rules
+and safety workflow when importing changes from a private checkout. Review
+files missing from the private checkout individually; absence alone is not a
+reason to delete public features.
+
+Before committing, run `git add` for the intended files, then
+`bun run audit:public`. The audit reads the Git index, including staged content,
+so a clean working copy cannot conceal a staged credential. Optionally supply
+`PUBLIC_AUDIT_DENY_FILE` with local-only identifiers. Never commit that file.
+
+`.env.example` may contain empty credential variables and public example URLs.
+Real `.env` variants, local settings, private keys and `teach-me/` records are
+excluded. Removing tracked private files affects the new tree only; historical
+commits require a separate review if past exposure is a concern.

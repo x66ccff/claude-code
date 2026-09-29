@@ -23,6 +23,7 @@ import {
 import {
   formatZodError,
   filterInvalidPermissionRules,
+  filterUnknownHookEvents,
   validateSettingsFileContent,
 } from '../validation'
 
@@ -427,6 +428,61 @@ describe('filterInvalidPermissionRules', () => {
       'Read',
       'Write',
     ])
+  })
+})
+
+describe('filterUnknownHookEvents', () => {
+  test('returns empty for non-object input', () => {
+    expect(filterUnknownHookEvents(null, 'test.json')).toEqual([])
+    expect(filterUnknownHookEvents('string', 'test.json')).toEqual([])
+  })
+
+  test('returns empty when no hooks', () => {
+    expect(filterUnknownHookEvents({}, 'test.json')).toEqual([])
+  })
+
+  test('strips unknown hook events (newer official CLI) with warnings', () => {
+    const data = {
+      hooks: {
+        PreToolUse: [{ matcher: 'Bash', hooks: [] }],
+        PostToolBatch: [{ hooks: [] }],
+        UserPromptExpansion: [{ hooks: [] }],
+      },
+    }
+    const warnings = filterUnknownHookEvents(data, 'test.json')
+    expect(warnings.length).toBe(2)
+    expect(warnings.map(w => w.path).sort()).toEqual([
+      'hooks.PostToolBatch',
+      'hooks.UserPromptExpansion',
+    ])
+    expect(Object.keys((data as any).hooks)).toEqual(['PreToolUse'])
+  })
+
+  test('preserves all known hook events', () => {
+    const data = {
+      hooks: {
+        PreToolUse: [],
+        PostToolUse: [],
+        SessionStart: [],
+        UserPromptSubmit: [],
+      },
+    }
+    const warnings = filterUnknownHookEvents(data, 'test.json')
+    expect(warnings).toEqual([])
+    expect(Object.keys((data as any).hooks).length).toBe(4)
+  })
+
+  test('filtered settings then pass schema validation (env survives)', () => {
+    // Regression: macOS settings.json shared with a newer official Claude Code
+    // contained PostToolBatch/UserPromptExpansion hooks; the enum-keyed record
+    // rejected the WHOLE file ("Invalid key in record"), losing env/API key.
+    const data = {
+      env: { ANTHROPIC_API_KEY: 'sk-test' },
+      hooks: { PostToolBatch: [{ hooks: [] }] },
+    }
+    filterUnknownHookEvents(data, 'test.json')
+    const result = SettingsSchema().safeParse(data)
+    expect(result.success).toBe(true)
   })
 })
 

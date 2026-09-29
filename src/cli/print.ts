@@ -185,7 +185,7 @@ import {
   logSuggestionSuppressed,
   type PromptVariant,
 } from 'src/services/PromptSuggestion/promptSuggestion.js'
-import { getLastCacheSafeParams } from 'src/utils/forkedAgent.js'
+import { getLastCacheSafeParams } from 'src/utils/cacheSafeParamsSlot.js'
 import { getAccountInformation } from 'src/utils/auth.js'
 import { OAuthService } from 'src/services/oauth/index.js'
 import { installOAuthTokens } from 'src/cli/handlers/auth.js'
@@ -205,6 +205,7 @@ import {
   hydrateRemoteSession,
   hydrateFromCCRv2InternalEvents,
   resetSessionFilePointer,
+  describeSessionSearchPaths,
   doesMessageExistInSession,
   findUnresolvedToolUse,
   recordAttributionSnapshot,
@@ -649,6 +650,9 @@ export async function runHeadless(
               hook_id: event.hookId,
               hook_name: event.hookName,
               hook_event: event.hookEvent,
+              hook_source: event.hookSource,
+              hook_type: event.hookType,
+              display_input: event.displayInput,
               uuid: randomUUID(),
               session_id: getSessionId(),
             }
@@ -659,6 +663,9 @@ export async function runHeadless(
               hook_id: event.hookId,
               hook_name: event.hookName,
               hook_event: event.hookEvent,
+              hook_source: event.hookSource,
+              hook_type: event.hookType,
+              display_input: event.displayInput,
               stdout: event.stdout,
               stderr: event.stderr,
               output: event.output,
@@ -672,6 +679,10 @@ export async function runHeadless(
               hook_id: event.hookId,
               hook_name: event.hookName,
               hook_event: event.hookEvent,
+              hook_source: event.hookSource,
+              hook_type: event.hookType,
+              display_input: event.displayInput,
+              duration_ms: event.durationMs,
               output: event.output,
               stdout: event.stdout,
               stderr: event.stderr,
@@ -5332,7 +5343,7 @@ async function loadInitialMessages(
           }
         } else {
           emitLoadError(
-            `No conversation found with session ID: ${parsedSessionId.sessionId}`,
+            `No conversation found with session ID: ${parsedSessionId.sessionId}\n${describeSessionSearchPaths(parsedSessionId.sessionId)}`,
             options.outputFormat,
           )
           gracefulShutdownSync(1)

@@ -186,6 +186,10 @@ export function Login(props: {
             <ConsoleOAuthFlow
               onDone={() => props.onDone(true, mainLoopModel)}
               startingMessage={props.startingMessage}
+              // POWER_USER: this fork never uses the official Anthropic
+              // subscription — skip the method menu and open the unified
+              // Base URL / API key / model config form directly.
+              initialMethod={feature('POWER_USER') ? 'custom_platform' : undefined}
             />
           </>
         )}

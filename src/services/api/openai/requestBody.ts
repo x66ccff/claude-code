@@ -82,6 +82,8 @@ export function buildOpenAIRequestBody(params: {
   reasoningEffort?: EffortLevel
   maxTokens: number
   temperatureOverride?: number
+  /** Session-scoped routing key for official OpenAI requests. */
+  promptCacheKey?: string
 }): ChatCompletionCreateParamsStreaming & {
   thinking?: { type: string }
   enable_thinking?: boolean
@@ -91,6 +93,8 @@ export function buildOpenAIRequestBody(params: {
     enable_thinking: boolean
     reasoning_effort?: EffortLevel
   }
+  /** Session-scoped prompt-cache routing key for official OpenAI. */
+  prompt_cache_key?: string
 } {
   const {
     model,
@@ -101,11 +105,13 @@ export function buildOpenAIRequestBody(params: {
     reasoningEffort,
     maxTokens,
     temperatureOverride,
+    promptCacheKey,
   } = params
   return {
     model,
     messages,
     max_tokens: maxTokens,
+    ...(promptCacheKey && { prompt_cache_key: promptCacheKey }),
     ...(tools.length > 0 && {
       tools,
       ...(toolChoice && { tool_choice: toolChoice }),

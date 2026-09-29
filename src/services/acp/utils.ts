@@ -2,6 +2,7 @@
  * Shared utilities for the ACP service.
  * Ported from claude-agent-acp-main/src/utils.ts and acp-agent.ts helpers.
  */
+import { feature } from 'bun:bundle'
 import { Writable } from 'node:stream'
 import type { PermissionMode } from '../../entrypoints/sdk/coreTypes.generated.js'
 
@@ -95,7 +96,10 @@ const IS_ROOT =
     : typeof process.getuid === 'function'
       ? process.getuid() === 0
       : false
-const ALLOW_BYPASS = !IS_ROOT || !!process.env.IS_SANDBOX
+// POWER_USER allows bypass regardless of root/sudo.
+const ALLOW_BYPASS = feature('POWER_USER')
+  ? true
+  : !IS_ROOT || !!process.env.IS_SANDBOX
 
 const PERMISSION_MODE_ALIASES: Record<string, PermissionMode> = {
   auto: 'auto',

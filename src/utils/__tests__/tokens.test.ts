@@ -36,6 +36,8 @@ const {
   getCurrentUsage,
   doesMostRecentAssistantMessageExceed200k,
   getAssistantMessageContentLength,
+  getPostCompactTokenEstimate,
+  getThinkingTokenSummary,
 } = await import('../tokens')
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -70,6 +72,15 @@ function makeUserMessage(text: string) {
     type: 'user' as const,
     uuid: `test-${Math.random()}`,
     message: { role: 'user' as const, content: text },
+  }
+}
+
+function makeCompactBoundaryMessage(compactMetadata: Record<string, unknown>) {
+  return {
+    type: 'system' as const,
+    subtype: 'compact_boundary' as const,
+    uuid: `test-${Math.random()}`,
+    compactMetadata,
   }
 }
 
@@ -278,5 +289,121 @@ describe('getAssistantMessageContentLength', () => {
       { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } },
     ])
     expect(getAssistantMessageContentLength(msg as any)).toBeGreaterThan(0)
+  })
+})
+
+// ─── getPostCompactTokenEstimate ────────────────────────────────────────
+
+describe('getPostCompactTokenEstimate', () => {
+  test('returns null for empty history', () => {
+    expect(getPostCompactTokenEstimate([])).toBeNull()
+  })
+
+  test('returns the boundary estimate when it is the newest entry', () => {
+    const messages = [
+      makeAssistantMessage([{ type: 'text', text: 'old' }]),
+      makeCompactBoundaryMessage({ estimatedPostCompactTokens: 12000 }),
+    ]
+    expect(getPostCompactTokenEstimate(messages as any)).toBe(12000)
+  })
+
+  test('returns null once a real API usage arrives after the boundary', () => {
+    const messages = [
+      makeCompactBoundaryMessage({ estimatedPostCompactTokens: 12000 }),
+      makeAssistantMessage([{ type: 'text', text: 'fresh' }]),
+    ]
+    expect(getPostCompactTokenEstimate(messages as any)).toBeNull()
+  })
+
+  test('returns null for a boundary without a numeric estimate', () => {
+    const messages = [makeCompactBoundaryMessage({})]
+    expect(getPostCompactTokenEstimate(messages as any)).toBeNull()
+  })
+
+  test('returns null for a negative or non-finite estimate', () => {
+    expect(
+      getPostCompactTokenEstimate([
+        makeCompactBoundaryMessage({ estimatedPostCompactTokens: -5 }),
+      ] as any),
+    ).toBeNull()
+    expect(
+      getPostCompactTokenEstimate([
+        makeCompactBoundaryMessage({
+          estimatedPostCompactTokens: Number.NaN,
+        }),
+      ] as any),
+    ).toBeNull()
+  })
+})
+
+// ─── getThinkingTokenSummary ────────────────────────────────────────────
+
+describe('getThinkingTokenSummary', () => {
+  test('sums exact thinking_tokens deduped by response id', () => {
+    // One API response split across two records sharing the same id.
+    const usage = { input_tokens: 10, output_tokens: 5, thinking_tokens: 500 }
+    const a = makeAssistantMessage(
+      [{ type: 'thinking', thinking: 'aaaa' }],
+      usage,
+      undefined,
+      'msg_same',
+    )
+    const b = makeAssistantMessage(
+      [{ type: 'text', text: 'hi' }],
+      usage,
+      undefined,
+      'msg_same',
+    )
+    const result = getThinkingTokenSummary([a, b] as any)
+    expect(result.tokens).toBe(500)
+    expect(result.estimated).toBe(false)
+  })
+
+  test('reads completion_tokens_details.reasoning_tokens', () => {
+    const msg = makeAssistantMessage([{ type: 'text', text: 'x' }], {
+      input_tokens: 10,
+      output_tokens: 5,
+      completion_tokens_details: { reasoning_tokens: 300 },
+    })
+    const result = getThinkingTokenSummary([msg] as any)
+    expect(result.tokens).toBe(300)
+    expect(result.estimated).toBe(false)
+  })
+
+  test('estimates from thinking blocks when no exact value exists', () => {
+    // roughTokenCountEstimation is mocked as ceil(len/4); 8 chars → 2 tokens.
+    const msg = makeAssistantMessage(
+      [{ type: 'thinking', thinking: 'abcdefgh' }],
+      { input_tokens: 10, output_tokens: 5 },
+    )
+    const result = getThinkingTokenSummary([msg] as any)
+    expect(result.tokens).toBe(2)
+    expect(result.estimated).toBe(true)
+  })
+
+  test('mixes exact and estimated across separate responses', () => {
+    const exact = makeAssistantMessage([{ type: 'text', text: 'x' }], {
+      input_tokens: 10,
+      output_tokens: 5,
+      thinking_tokens: 500,
+    })
+    const estimated = makeAssistantMessage(
+      [{ type: 'thinking', thinking: 'abcdefgh' }],
+      { input_tokens: 10, output_tokens: 5 },
+      undefined,
+      'msg_other',
+    )
+    const result = getThinkingTokenSummary([exact, estimated] as any)
+    expect(result.tokens).toBe(502)
+    expect(result.estimated).toBe(true)
+  })
+
+  test('ignores non-assistant messages', () => {
+    const result = getThinkingTokenSummary([
+      makeUserMessage('hello'),
+      makeCompactBoundaryMessage({ estimatedPostCompactTokens: 100 }),
+    ] as any)
+    expect(result.tokens).toBe(0)
+    expect(result.estimated).toBe(false)
   })
 })

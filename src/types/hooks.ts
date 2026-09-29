@@ -226,8 +226,11 @@ export type HookCallbackMatcher = {
 
 export type HookProgress = {
   type: 'hook_progress'
+  hookId: string
   hookEvent: HookEvent
   hookName: string
+  hookSource: string
+  hookType: 'command' | 'prompt' | 'agent' | 'http' | 'callback' | 'function'
   command: string
   promptText?: string
   statusMessage?: string

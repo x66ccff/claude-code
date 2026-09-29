@@ -119,6 +119,41 @@ export function getAutoCompactThreshold(model: string): number {
   return autocompactThreshold
 }
 
+/**
+ * Fraction of the autocompact threshold at which turn-end background work
+ * (memory extraction, prompt suggestion, session memory) is deferred.
+ * Rationale: near the threshold these forks would carry almost the entire
+ * conversation history, making them slow; they would still be in flight when
+ * the next turn's autocompact fires, producing two concurrent large API
+ * requests and UI cross-talk. Compaction replaces the history anyway, so
+ * skipping one extraction cycle costs little (cursors only advance on
+ * success, so nothing is lost).
+ */
+const NEAR_AUTOCOMPACT_RATIO = 0.9
+
+/**
+ * True when the conversation is close enough to the autocompact threshold
+ * that the next turn is likely to trigger compaction. Synchronous and cheap
+ * (no API calls) — safe to consult from turn-end hooks.
+ */
+export function isNearAutoCompactThreshold(
+  messages: Message[],
+  model: string,
+): boolean {
+  if (!isAutoCompactEnabled()) {
+    return false
+  }
+  const tokenCount = tokenCountWithEstimation(messages)
+  const nearThreshold = getAutoCompactThreshold(model) * NEAR_AUTOCOMPACT_RATIO
+  const near = tokenCount >= nearThreshold
+  if (near) {
+    logForDebugging(
+      `autocompact: near-threshold (${tokenCount} >= ${Math.round(nearThreshold)}), deferring turn-end background forks`,
+    )
+  }
+  return near
+}
+
 export function calculateTokenWarningState(
   tokenUsage: number,
   model: string,

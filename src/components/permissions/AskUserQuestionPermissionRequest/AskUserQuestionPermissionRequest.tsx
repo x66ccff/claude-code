@@ -1,5 +1,5 @@
 import type { Base64ImageSource, ImageBlockParam } from '@anthropic-ai/sdk/resources/messages.mjs';
-import React, { Suspense, use, useCallback, useMemo, useRef, useState } from 'react';
+import React, { Suspense, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSettings } from '../../../hooks/useSettings.js';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { stringWidth, useTheme } from '@anthropic/ink';
@@ -11,6 +11,10 @@ import {
 import { useAppState } from '../../../state/AppState.js';
 import type { Question } from '@claude-code-best/builtin-tools/tools/AskUserQuestionTool/AskUserQuestionTool.js';
 import { AskUserQuestionTool } from '@claude-code-best/builtin-tools/tools/AskUserQuestionTool/AskUserQuestionTool.js';
+import {
+  buildAskUserQuestionTimeoutFeedback,
+  getAskUserQuestionTimeoutMs,
+} from '../../../utils/askUserQuestionTimeout.js';
 import { type CliHighlight, getCliHighlightPromise } from '../../../utils/cliHighlight.js';
 import type { PastedContent } from '../../../utils/config.js';
 import type { ImageDimensions } from '../../../utils/imageResizer.js';
@@ -191,6 +195,27 @@ function AskUserQuestionPermissionRequestBody({
     setAnswer,
     setTextInputMode,
   } = state;
+
+  // Idle timeout: if the user doesn't interact with the dialog for
+  // questionTimeoutMs (default 10 minutes, env
+  // CLAUDE_CODE_ASK_USER_QUESTION_TIMEOUT_MS, 0 disables), assume they walked
+  // away. Dismiss the dialog and reject with feedback instructing the model to
+  // proceed with the recommended/default option or its own best judgment.
+  // Any state change (answer, navigation, text input) re-arms the timer.
+  const questionTimeoutMs = getAskUserQuestionTimeoutMs();
+  const handleTimeout = useCallback(() => {
+    onDone();
+    toolUseConfirm.onReject(buildAskUserQuestionTimeoutFeedback(questions, questionTimeoutMs));
+  }, [onDone, toolUseConfirm, questions, questionTimeoutMs]);
+  const handleTimeoutRef = useRef(handleTimeout);
+  useEffect(() => {
+    handleTimeoutRef.current = handleTimeout;
+  }, [handleTimeout]);
+  useEffect(() => {
+    if (questionTimeoutMs <= 0) return undefined;
+    const timer = setTimeout(() => handleTimeoutRef.current(), questionTimeoutMs);
+    return () => clearTimeout(timer);
+  }, [questionTimeoutMs, answers, currentQuestionIndex, questionStates, isInTextInput]);
 
   const currentQuestion = currentQuestionIndex < (questions?.length || 0) ? questions?.[currentQuestionIndex] : null;
 

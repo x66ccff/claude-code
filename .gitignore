@@ -57,3 +57,13 @@ credentials.json
 .squash-tmp/
 .git.*-backup
 .public-export-local-patterns
+
+# Private configuration and credential material
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+settings.local.json
+CLAUDE.local.md

@@ -32,6 +32,7 @@ import type {
   SystemCompactBoundaryMessage,
   UserMessage,
 } from '../../types/message.js'
+import { createChildAbortController } from '../../utils/abortController.js'
 import {
   createAttachmentMessage,
   generateFileAttachment,
@@ -137,6 +138,31 @@ export const POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000
 export const POST_COMPACT_MAX_TOKENS_PER_SKILL = 5_000
 export const POST_COMPACT_SKILLS_TOKEN_BUDGET = 25_000
 const MAX_COMPACT_STREAMING_RETRIES = 2
+
+/**
+ * Compact stall watchdog config (feature STALL_RETRY): if a compact attempt
+ * does not complete within the timeout it is aborted and retried (bounded
+ * retries, short delay between attempts). Env overrides for tuning without
+ * rebuilds.
+ *   CCB_COMPACT_STALL_TIMEOUT_MS     (default 10 minutes)
+ *   CCB_COMPACT_STALL_MAX_RETRIES    (default 10)
+ *   CCB_COMPACT_STALL_RETRY_DELAY_MS (default 5 seconds)
+ */
+function getCompactStallTimeoutMs(): number {
+  const override = parseInt(process.env.CCB_COMPACT_STALL_TIMEOUT_MS || '', 10)
+  return override > 0 ? override : 10 * 60_000
+}
+function getCompactStallMaxRetries(): number {
+  const override = parseInt(process.env.CCB_COMPACT_STALL_MAX_RETRIES || '', 10)
+  return override >= 0 ? override : 10
+}
+function getCompactStallRetryDelayMs(): number {
+  const override = parseInt(
+    process.env.CCB_COMPACT_STALL_RETRY_DELAY_MS || '',
+    10,
+  )
+  return override >= 0 ? override : 5_000
+}
 
 /**
  * Strip image blocks from user messages before sending for compaction.
@@ -338,11 +364,15 @@ export type RecompactionInfo = {
  * Order: boundaryMarker, summaryMessages, messagesToKeep, attachments, hookResults
  */
 export function buildPostCompactMessages(result: CompactionResult): Message[] {
+  // Attach the estimated post-compact token count to the boundary marker so
+  // the context usage bar can show an estimate until the first real
+  // post-compact API response supplies authoritative usage.
   const estimatedPostCompactTokens = result.truePostCompactTokenCount
   const boundaryMarker =
     typeof estimatedPostCompactTokens === 'number' &&
     Number.isFinite(estimatedPostCompactTokens) &&
-    estimatedPostCompactTokens >= 0
+    estimatedPostCompactTokens >= 0 &&
+    isCompactBoundaryMessage(result.boundaryMarker)
       ? {
           ...result.boundaryMarker,
           compactMetadata: {
@@ -351,13 +381,12 @@ export function buildPostCompactMessages(result: CompactionResult): Message[] {
           },
         }
       : result.boundaryMarker
-  return [
-    boundaryMarker,
-    ...result.summaryMessages,
-    ...stripToolUseResults(result.messagesToKeep),
-    ...result.attachments,
-    ...result.hookResults,
-  ]
+  return ([boundaryMarker] as Message[]).concat(
+    result.summaryMessages,
+    stripToolUseResults(result.messagesToKeep),
+    result.attachments,
+    result.hookResults,
+  )
 }
 
 /** Release large UI-only tool result payloads from kept messages. */
@@ -458,6 +487,9 @@ export async function compactConversation(
       },
       context.abortController.signal,
     )
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError()
+    }
     customInstructions = mergeHookInstructions(
       customInstructions,
       hookResult.newCustomInstructions,
@@ -635,7 +667,11 @@ export async function compactConversation(
     // Execute SessionStart hooks after successful compaction
     const hookMessages = await processSessionStartHooks('compact', {
       model: context.options.mainLoopModel,
+      signal: context.abortController.signal,
     })
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError()
+    }
 
     // Create the compact boundary marker and summary messages before the
     // event so we can compute the true resulting-context size.
@@ -773,6 +809,9 @@ export async function compactConversation(
       },
       context.abortController.signal,
     )
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError()
+    }
 
     const combinedUserDisplayMessage = [
       userDisplayMessage,
@@ -801,10 +840,12 @@ export async function compactConversation(
     }
     throw error
   } finally {
-    context.setStreamMode?.('requesting')
-    context.setResponseLength?.(() => 0)
+    if (!context.abortController.signal.aborted) {
+      context.setStreamMode?.('requesting')
+      context.setResponseLength?.(() => 0)
+      context.setSDKStatus?.('' as SDKStatus)
+    }
     context.onCompactProgress?.({ type: 'compact_end' })
-    context.setSDKStatus?.('' as SDKStatus)
   }
 }
 
@@ -868,6 +909,9 @@ export async function partialCompactConversation(
       },
       context.abortController.signal,
     )
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError()
+    }
 
     // Merge hook instructions with user feedback
     let customInstructions: string | undefined
@@ -1029,7 +1073,11 @@ export async function partialCompactConversation(
     })
     const hookMessages = await processSessionStartHooks('compact', {
       model: context.options.mainLoopModel,
+      signal: context.abortController.signal,
     })
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError()
+    }
 
     const postCompactTokenCount = tokenCountFromLastAPIResponse([
       summaryResponse,
@@ -1124,6 +1172,9 @@ export async function partialCompactConversation(
       },
       context.abortController.signal,
     )
+    if (context.abortController.signal.aborted) {
+      throw new APIUserAbortError()
+    }
 
     // 'from': prefix-preserving → boundary; 'up_to': suffix → last summary
     const anchorUuid =
@@ -1149,10 +1200,12 @@ export async function partialCompactConversation(
     addErrorNotificationIfNeeded(error, context)
     throw error
   } finally {
-    context.setStreamMode?.('requesting')
-    context.setResponseLength?.(() => 0)
+    if (!context.abortController.signal.aborted) {
+      context.setStreamMode?.('requesting')
+      context.setResponseLength?.(() => 0)
+      context.setSDKStatus?.('' as SDKStatus)
+    }
     context.onCompactProgress?.({ type: 'compact_end' })
-    context.setSDKStatus?.('' as SDKStatus)
   }
 }
 
@@ -1161,6 +1214,7 @@ function addErrorNotificationIfNeeded(
   context: Pick<ToolUseContext, 'addNotification'>,
 ) {
   if (
+    !(error instanceof APIUserAbortError) &&
     !hasExactErrorMessage(error, ERROR_MESSAGE_USER_ABORT) &&
     !hasExactErrorMessage(error, ERROR_MESSAGE_NOT_ENOUGH_MESSAGES)
   ) {
@@ -1184,21 +1238,130 @@ export function createCompactCanUseTool(): CanUseToolFn {
   })
 }
 
-async function streamCompactSummary({
-  messages,
-  summaryRequest,
-  appState,
-  context,
-  preCompactTokenCount,
-  cacheSafeParams,
-}: {
+type StreamCompactSummaryParams = {
   messages: Message[]
   summaryRequest: UserMessage
   appState: Awaited<ReturnType<ToolUseContext['getAppState']>>
   context: ToolUseContext
   preCompactTokenCount: number
   cacheSafeParams: CacheSafeParams
-}): Promise<AssistantMessage> {
+}
+
+/**
+ * Entry point for streaming the compact summary. With feature STALL_RETRY
+ * the actual work (streamCompactSummaryOnce) is wrapped in a stall watchdog:
+ * if a compact attempt does not complete within the timeout (default 10
+ * minutes) the attempt is aborted and retried (max retries default 10, delay
+ * default 5s). Each attempt runs under a child AbortController so aborting a
+ * hung attempt does not kill the main turn.
+ */
+async function streamCompactSummary(
+  params: StreamCompactSummaryParams,
+): Promise<AssistantMessage> {
+  const response = feature('STALL_RETRY')
+    ? await streamCompactSummaryWithStallRetry(params)
+    : await streamCompactSummaryOnce(params)
+  if (params.context.abortController.signal.aborted) {
+    throw new APIUserAbortError()
+  }
+  return response
+}
+
+// Grace period for an aborted compact attempt to settle (run its finally
+// blocks, close the stream) before the retry loop moves on without it.
+const COMPACT_ABORT_GRACE_MS = 5_000
+
+async function streamCompactSummaryWithStallRetry(
+  params: StreamCompactSummaryParams,
+): Promise<AssistantMessage> {
+  const timeoutMs = getCompactStallTimeoutMs()
+  const maxRetries = getCompactStallMaxRetries()
+  const delayMs = getCompactStallRetryDelayMs()
+  const parentSignal = params.context.abortController.signal
+
+  let retriesUsed = 0
+  for (;;) {
+    // Child controller per attempt: aborting a hung attempt must NOT abort
+    // the main turn (parent). Parent aborts (user Esc) still propagate down.
+    const attemptController = createChildAbortController(
+      params.context.abortController,
+    )
+    const workPromise = streamCompactSummaryOnce({
+      ...params,
+      context: { ...params.context, abortController: attemptController },
+    })
+
+    let timedOut: boolean
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      timedOut = await Promise.race([
+        // Work errors propagate as-is — only a clean completion reports
+        // "no timeout" here.
+        workPromise.then(() => false),
+        new Promise<boolean>(resolve => {
+          timer = setTimeout(() => resolve(true), timeoutMs)
+          if (typeof timer === 'object') timer.unref?.()
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+    if (!timedOut) {
+      return await workPromise
+    }
+
+    // Stall: abort the hung attempt and give it a short grace period to run
+    // its cleanup before retrying without it.
+    attemptController.abort()
+    logForDebugging(
+      `Compact stall timeout: compact attempt exceeded ${timeoutMs / 1000}s without completing, aborting for retry`,
+      { level: 'error' },
+    )
+    logEvent('tengu_compact_stall_timeout', {
+      timeoutMs,
+      retry: retriesUsed,
+      preCompactTokenCount: params.preCompactTokenCount,
+    })
+    await Promise.race([
+      workPromise.then(
+        () => undefined,
+        () => undefined,
+      ),
+      sleep(COMPACT_ABORT_GRACE_MS),
+    ])
+
+    if (parentSignal.aborted) {
+      // User aborted the turn while we were stalled — surface as user abort.
+      throw new APIUserAbortError()
+    }
+    if (retriesUsed >= maxRetries) {
+      throw new Error(
+        `Compact stall timeout - compact did not complete within ${timeoutMs / 1000}s after ${maxRetries} retries`,
+      )
+    }
+    retriesUsed++
+    logForDebugging(
+      `Compact stall retry ${retriesUsed}/${maxRetries} in ${delayMs / 1000}s`,
+      { level: 'warn' },
+    )
+    logEvent('tengu_compact_stall_retry', {
+      retry: retriesUsed,
+      preCompactTokenCount: params.preCompactTokenCount,
+    })
+    await sleep(delayMs, parentSignal, {
+      abortError: () => new APIUserAbortError(),
+    })
+  }
+}
+
+async function streamCompactSummaryOnce({
+  messages,
+  summaryRequest,
+  appState,
+  context,
+  preCompactTokenCount,
+  cacheSafeParams,
+}: StreamCompactSummaryParams): Promise<AssistantMessage> {
   // When prompt cache sharing is enabled, use forked agent to reuse the
   // main conversation's cached prefix (system prompt, tools, context messages).
   // Falls back to regular streaming path on failure.
@@ -1249,10 +1412,16 @@ async function streamCompactSummary({
               skipCacheWrite: true,
               // A child controller lets a stuck cache-sharing fork time out
               // without poisoning the regular compact fallback signal.
-              overrides: { abortController: forkAbortController },
+              overrides: {
+                abortController: forkAbortController,
+                shareSetResponseLength: true,
+              },
             }),
           getCompactForkTimeoutMs(),
         )
+        if (context.abortController.signal.aborted) {
+          throw new APIUserAbortError()
+        }
         const assistantMsg = getLastAssistantMessage(result.messages)
         const assistantText = assistantMsg
           ? getAssistantMessageText(assistantMsg)
@@ -1420,6 +1589,17 @@ async function streamCompactSummary({
         ) {
           const charactersStreamed = streamEvent.event.delta.text.length
           context.setResponseLength?.(length => length + charactersStreamed)
+          // Surface streamed summary text so the UI can show a live marquee
+          // of the compaction content (transparency while compacting).
+          // This is the streaming-fallback compact path itself, so the
+          // source is always 'compact'.
+          if (feature('THINKING_MARQUEE')) {
+            context.onCompactProgress?.({
+              type: 'compact_text_delta',
+              text: streamEvent.event.delta.text,
+              source: 'compact',
+            })
+          }
         }
 
         if (event.type === 'assistant') {

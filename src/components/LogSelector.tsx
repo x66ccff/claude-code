@@ -338,8 +338,15 @@ export function LogSelector({
       const displayedTitle = getLogDisplayTitle(log).toLowerCase();
       const branch = (log.gitBranch || '').toLowerCase();
       const tag = (log.tag || '').toLowerCase();
+      const host = (log.hostname || '').toLowerCase();
       const prInfo = log.prNumber ? `pr #${log.prNumber} ${log.prRepository || ''}`.toLowerCase() : '';
-      return displayedTitle.includes(query) || branch.includes(query) || tag.includes(query) || prInfo.includes(query);
+      return (
+        displayedTitle.includes(query) ||
+        branch.includes(query) ||
+        tag.includes(query) ||
+        host.includes(query) ||
+        prInfo.includes(query)
+      );
     });
   }, [baseFilteredLogs, searchQuery]);
 
@@ -1211,6 +1218,7 @@ function buildSearchableText(log: LogOption): string {
     log.firstPrompt,
     log.gitBranch,
     log.tag,
+    log.hostname,
     log.prNumber ? `PR #${log.prNumber}` : undefined,
     log.prRepository,
   ]

@@ -30,6 +30,21 @@ export function setAppCallbacks(cb: AppCallbacks): void {
 function isEnvTruthy(value: string | undefined): boolean {
   return value === '1' || value === 'true';
 }
+
+// Opt-in raw stdin capture for diagnosing dropped/garbled keystrokes under
+// terminal multiplexers (zellij/tmux). Set CCB_STDIN_LOG=/path/to/file.log
+// to append one line per stdin chunk: epoch-ms + JSON-escaped bytes. Off by
+// default; when unset this costs one null check per chunk.
+const STDIN_LOG_PATH = process.env.CCB_STDIN_LOG || null;
+function logStdinChunk(chunk: string): void {
+  if (!STDIN_LOG_PATH) return;
+  try {
+    appendFileSync(STDIN_LOG_PATH, `${Date.now()} ${JSON.stringify(chunk)}\n`);
+  } catch {
+    // Never let logging break input processing.
+  }
+}
+import { appendFileSync } from 'fs';
 import { EventEmitter } from '../core/events/emitter.js';
 import { InputEvent } from '../core/events/input-event.js';
 import { TerminalFocusEvent } from '../core/events/terminal-focus-event.js';
@@ -445,8 +460,12 @@ export default class App extends PureComponent<Props, State> {
     try {
       let chunk;
       while ((chunk = this.props.stdin.read() as string | null) !== null) {
-        // Process the input chunk
+        logStdinChunk(String(chunk));
+        // Process the input chunk. A single readable event can contain multiple
+        // IME commit chunks; commit each update before reading the next chunk so
+        // text handlers do not reuse a stale cursor and overwrite earlier text.
         this.processInput(chunk);
+        reconciler.flushSyncWork();
       }
     } catch (error) {
       // In Bun, an uncaught throw inside a stream 'readable' handler can
