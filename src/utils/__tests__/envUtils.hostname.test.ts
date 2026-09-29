@@ -42,9 +42,7 @@ afterEach(() => {
 
 describe('isRecordableSessionHostname', () => {
   test('accepts dsw-prefixed PAI hostnames', () => {
-    expect(isRecordableSessionHostname('dsw-example-worker')).toBe(
-      true,
-    )
+    expect(isRecordableSessionHostname('dsw-example-worker')).toBe(true)
   })
 
   test('accepts dlc-prefixed PAI hostnames', () => {
