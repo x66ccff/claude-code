@@ -1,3 +1,9 @@
+x66ccff 魔改的 claude-code，基于claude-code-best构建
+
+![demo](docs/assets/terminal-demo.gif)
+
+---
+
 # Claude Code Best V5 (CCB)
 
 [![GitHub Stars](https://img.shields.io/github/stars/claude-code-best/claude-code?style=flat-square&logo=github&color=yellow)](https://github.com/claude-code-best/claude-code/stargazers)
