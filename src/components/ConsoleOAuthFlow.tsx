@@ -3,6 +3,7 @@ import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
 } from 'src/services/analytics/index.js';
+import { setMainLoopModelOverride } from '../bootstrap/state.js';
 import { installOAuthTokens } from '../cli/handlers/auth.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { setClipboard, useTerminalNotification, Box, Link, Text, KeyboardShortcutHint } from '@anthropic/ink';
@@ -31,6 +32,13 @@ type Props = {
   startingMessage?: string;
   mode?: 'login' | 'setup-token';
   forceLoginMethod?: 'claudeai' | 'console';
+  /**
+   * POWER_USER: skip the login-method menu and open this method's form
+   * directly. Currently only 'custom_platform' (Anthropic Compatible) —
+   * the unified Base URL / API key / model-name config screen reused by
+   * /login, /model and /provider.
+   */
+  initialMethod?: 'custom_platform';
 };
 
 type OAuthStatus =
@@ -40,10 +48,11 @@ type OAuthStatus =
       state: 'custom_platform';
       baseUrl: string;
       apiKey: string;
+      mainModel: string;
       haikuModel: string;
       sonnetModel: string;
       opusModel: string;
-      activeField: 'base_url' | 'api_key' | 'haiku_model' | 'sonnet_model' | 'opus_model';
+      activeField: 'base_url' | 'api_key' | 'main_model' | 'haiku_model' | 'sonnet_model' | 'opus_model';
     } // Custom platform: configure API endpoint and model names
   | {
       state: 'openai_chat_api';
@@ -83,12 +92,69 @@ type OAuthStatus =
       toRetry?: OAuthStatus;
     };
 
+/**
+ * True when a value looks like a URL rather than an API key. Used to guard the
+ * "Anthropic Compatible" / "OpenAI Compatible" forms against silently writing a
+ * Base URL into the key slot (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN /
+ * OPENAI_API_KEY), which breaks auth with "401 invalid api-key" after restart.
+ * Real keys (sk-ant-…, sk-pai-…) never begin with an http(s) scheme.
+ */
+function looksLikeUrl(value: string): boolean {
+  const v = value.trim();
+  if (!v) return false;
+  if (/^https?:\/\//i.test(v)) return true;
+  try {
+    const proto = new URL(v).protocol;
+    return proto === 'http:' || proto === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pick the first candidate that looks like a real API key (non-empty and not a
+ * URL). Prefers ANTHROPIC_AUTH_TOKEN, then ANTHROPIC_API_KEY, but skips any
+ * misconfigured URL value so the prefill can't re-introduce a Base URL that
+ * leaked into a token slot.
+ */
+function pickApiKeyPrefill(...candidates: (string | undefined)[]): string {
+  for (const candidate of candidates) {
+    if (candidate && !looksLikeUrl(candidate)) return candidate;
+  }
+  return '';
+}
+
+/**
+ * Prefill for the "Anthropic Compatible" (custom_platform) form. Shared by the
+ * login-method menu, the skip-menu entry (initialMethod prop), and error
+ * retries so all paths agree on env var precedence.
+ *
+ * API key: the Anthropic-protocol client accepts either ANTHROPIC_API_KEY
+ * (x-api-key header) or ANTHROPIC_AUTH_TOKEN (Bearer). Prefill from whichever
+ * holds a real key (URL-valued tokens are skipped — see pickApiKeyPrefill);
+ * save writes BOTH (see doSave) so the config works regardless of which header
+ * the proxy expects.
+ */
+function makeCustomPlatformState(): Extract<OAuthStatus, { state: 'custom_platform' }> {
+  return {
+    state: 'custom_platform',
+    baseUrl: process.env.ANTHROPIC_BASE_URL ?? '',
+    apiKey: pickApiKeyPrefill(process.env.ANTHROPIC_AUTH_TOKEN, process.env.ANTHROPIC_API_KEY),
+    mainModel: process.env.ANTHROPIC_MODEL ?? '',
+    haikuModel: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL ?? '',
+    sonnetModel: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ?? '',
+    opusModel: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL ?? '',
+    activeField: 'base_url',
+  };
+}
+
 const PASTE_HERE_MSG = 'Paste code here if prompted > ';
 export function ConsoleOAuthFlow({
   onDone,
   startingMessage,
   mode = 'login',
   forceLoginMethod: forceLoginMethodProp,
+  initialMethod,
 }: Props): React.ReactNode {
   const settings = getSettings_DEPRECATED() || {};
   const forceLoginMethod = forceLoginMethodProp ?? settings.forceLoginMethod;
@@ -108,6 +174,10 @@ export function ConsoleOAuthFlow({
     }
     if (forceLoginMethod === 'claudeai' || forceLoginMethod === 'console') {
       return { state: 'ready_to_start' };
+    }
+    // POWER_USER unified config entry: skip the method menu entirely.
+    if (initialMethod === 'custom_platform') {
+      return makeCustomPlatformState();
     }
     return { state: 'idle' };
   });
@@ -532,15 +602,7 @@ function OAuthStatusMessage({
               onChange={value => {
                 if (value === 'custom_platform') {
                   logEvent('tengu_custom_platform_selected', {});
-                  setOAuthStatus({
-                    state: 'custom_platform',
-                    baseUrl: process.env.ANTHROPIC_BASE_URL ?? '',
-                    apiKey: process.env.ANTHROPIC_AUTH_TOKEN ?? '',
-                    haikuModel: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL ?? '',
-                    sonnetModel: process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ?? '',
-                    opusModel: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL ?? '',
-                    activeField: 'base_url',
-                  });
+                  setOAuthStatus(makeCustomPlatformState());
                 } else if (value === 'openai_chat_api') {
                   logEvent('tengu_openai_chat_api_selected', {});
                   setOAuthStatus({
@@ -592,21 +654,23 @@ function OAuthStatusMessage({
       );
 
     case 'custom_platform': {
-      type Field = 'base_url' | 'api_key' | 'haiku_model' | 'sonnet_model' | 'opus_model';
-      const FIELDS: Field[] = ['base_url', 'api_key', 'haiku_model', 'sonnet_model', 'opus_model'];
+      type Field = 'base_url' | 'api_key' | 'main_model' | 'haiku_model' | 'sonnet_model' | 'opus_model';
+      const FIELDS: Field[] = ['base_url', 'api_key', 'main_model', 'haiku_model', 'sonnet_model', 'opus_model'];
       const cp = oauthStatus as {
         state: 'custom_platform';
         activeField: Field;
         baseUrl: string;
         apiKey: string;
+        mainModel: string;
         haikuModel: string;
         sonnetModel: string;
         opusModel: string;
       };
-      const { activeField, baseUrl, apiKey, haikuModel, sonnetModel, opusModel } = cp;
+      const { activeField, baseUrl, apiKey, mainModel, haikuModel, sonnetModel, opusModel } = cp;
       const displayValues: Record<Field, string> = {
         base_url: baseUrl,
         api_key: apiKey,
+        main_model: mainModel,
         haiku_model: haikuModel,
         sonnet_model: sonnetModel,
         opus_model: opusModel,
@@ -622,6 +686,7 @@ function OAuthStatusMessage({
             activeField: newActive ?? activeField,
             baseUrl,
             apiKey,
+            mainModel,
             haikuModel,
             sonnetModel,
             opusModel,
@@ -631,6 +696,8 @@ function OAuthStatusMessage({
               return { ...s, baseUrl: value };
             case 'api_key':
               return { ...s, apiKey: value };
+            case 'main_model':
+              return { ...s, mainModel: value };
             case 'haiku_model':
               return { ...s, haikuModel: value };
             case 'sonnet_model':
@@ -639,7 +706,7 @@ function OAuthStatusMessage({
               return { ...s, opusModel: value };
           }
         },
-        [activeField, baseUrl, apiKey, haikuModel, sonnetModel, opusModel],
+        [activeField, baseUrl, apiKey, mainModel, haikuModel, sonnetModel, opusModel],
       );
 
       const _switchTo = useCallback(
@@ -667,6 +734,7 @@ function OAuthStatusMessage({
                 state: 'custom_platform',
                 baseUrl: '',
                 apiKey: '',
+                mainModel: '',
                 haikuModel: '',
                 sonnetModel: '',
                 opusModel: '',
@@ -678,14 +746,51 @@ function OAuthStatusMessage({
           env.ANTHROPIC_BASE_URL = finalVals.base_url;
         }
 
-        if (finalVals.api_key) env.ANTHROPIC_AUTH_TOKEN = finalVals.api_key;
+        if (finalVals.api_key) {
+          // Guard: reject a URL in the API Key field. This is the failure mode
+          // where the Base URL leaks into the key (e.g. a misconfigured
+          // ANTHROPIC_AUTH_TOKEN prefill); saving it would break auth with
+          // "401 invalid api-key" after restart. Real keys never look like URLs.
+          if (looksLikeUrl(finalVals.api_key) || finalVals.api_key === finalVals.base_url) {
+            setOAuthStatus({
+              state: 'error',
+              message:
+                'Invalid API key: that value looks like a URL, not a key. Please enter your API key (e.g. sk-...).',
+              toRetry: {
+                state: 'custom_platform',
+                baseUrl: finalVals.base_url ?? '',
+                apiKey: '',
+                mainModel: finalVals.main_model ?? '',
+                haikuModel: finalVals.haiku_model ?? '',
+                sonnetModel: finalVals.sonnet_model ?? '',
+                opusModel: finalVals.opus_model ?? '',
+                activeField: 'api_key',
+              },
+            });
+            return;
+          }
+          // Dual-write: Anthropic-protocol proxies authenticate via either
+          // x-api-key (ANTHROPIC_API_KEY) or Bearer (ANTHROPIC_AUTH_TOKEN).
+          // Writing both with the same value makes the config work regardless
+          // of which header the endpoint expects (client.ts reads both paths).
+          env.ANTHROPIC_API_KEY = finalVals.api_key;
+          env.ANTHROPIC_AUTH_TOKEN = finalVals.api_key;
+        }
+        if (finalVals.main_model) env.ANTHROPIC_MODEL = finalVals.main_model;
         if (finalVals.haiku_model) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = finalVals.haiku_model;
         if (finalVals.sonnet_model) env.ANTHROPIC_DEFAULT_SONNET_MODEL = finalVals.sonnet_model;
         if (finalVals.opus_model) env.ANTHROPIC_DEFAULT_OPUS_MODEL = finalVals.opus_model;
-        const { error } = updateSettingsForSource('userSettings', {
+        const settingsUpdate: Record<string, unknown> = {
           modelType: 'anthropic',
           env,
-        } as unknown as Parameters<typeof updateSettingsForSource>[1]);
+        };
+        // Keep the top-level `model` setting in sync so /model and the model
+        // resolver see the same value after a restart.
+        if (finalVals.main_model) settingsUpdate.model = finalVals.main_model;
+        const { error } = updateSettingsForSource(
+          'userSettings',
+          settingsUpdate as unknown as Parameters<typeof updateSettingsForSource>[1],
+        );
         if (error) {
           setOAuthStatus({
             state: 'error',
@@ -694,6 +799,7 @@ function OAuthStatusMessage({
               state: 'custom_platform',
               baseUrl: finalVals.base_url ?? '',
               apiKey: finalVals.api_key ?? '',
+              mainModel: finalVals.main_model ?? '',
               haikuModel: finalVals.haiku_model ?? '',
               sonnetModel: finalVals.sonnet_model ?? '',
               opusModel: finalVals.opus_model ?? '',
@@ -702,6 +808,10 @@ function OAuthStatusMessage({
           });
         } else {
           for (const [k, v] of Object.entries(env)) process.env[k] = v;
+          // Apply the main model to the CURRENT session immediately —
+          // getUserSpecifiedModelSetting() prefers this override over env and
+          // settings, so no restart is needed.
+          if (finalVals.main_model) setMainLoopModelOverride(finalVals.main_model);
           setOAuthStatus({ state: 'success' });
           void onDone();
         }
@@ -789,6 +899,7 @@ function OAuthStatusMessage({
           <Box flexDirection="column" gap={1}>
             {renderRow('base_url', 'Base URL ')}
             {renderRow('api_key', 'API Key  ', { mask: true })}
+            {renderRow('main_model', 'Model    ')}
             {renderRow('haiku_model', 'Haiku    ')}
             {renderRow('sonnet_model', 'Sonnet   ')}
             {renderRow('opus_model', 'Opus     ')}
@@ -880,7 +991,28 @@ function OAuthStatusMessage({
           env.OPENAI_BASE_URL = finalVals.base_url;
         }
 
-        if (finalVals.api_key) env.OPENAI_API_KEY = finalVals.api_key;
+        if (finalVals.api_key) {
+          // Guard: reject a URL in the API Key field (same failure mode as the
+          // Anthropic form — a Base URL leaking into the key breaks auth).
+          if (looksLikeUrl(finalVals.api_key) || finalVals.api_key === finalVals.base_url) {
+            setOAuthStatus({
+              state: 'error',
+              message:
+                'Invalid API key: that value looks like a URL, not a key. Please enter your API key (e.g. sk-...).',
+              toRetry: {
+                state: 'openai_chat_api',
+                baseUrl: finalVals.base_url ?? '',
+                apiKey: '',
+                haikuModel: finalVals.haiku_model ?? '',
+                sonnetModel: finalVals.sonnet_model ?? '',
+                opusModel: finalVals.opus_model ?? '',
+                activeField: 'api_key',
+              },
+            });
+            return;
+          }
+          env.OPENAI_API_KEY = finalVals.api_key;
+        }
         if (finalVals.haiku_model) env.OPENAI_DEFAULT_HAIKU_MODEL = finalVals.haiku_model;
         if (finalVals.sonnet_model) env.OPENAI_DEFAULT_SONNET_MODEL = finalVals.sonnet_model;
         if (finalVals.opus_model) env.OPENAI_DEFAULT_OPUS_MODEL = finalVals.opus_model;

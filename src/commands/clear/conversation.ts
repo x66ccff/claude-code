@@ -29,6 +29,7 @@ import {
 import { isLocalShellTask } from '../../tasks/LocalShellTask/guards.js'
 import { asAgentId } from '../../types/ids.js'
 import type { Message } from '../../types/message.js'
+import { saveCacheSafeParams } from '../../utils/cacheSafeParamsSlot.js'
 import { createEmptyAttributionState } from '../../utils/commitAttribution.js'
 import type { FileStateCache } from '../../utils/fileStateCache.js'
 import {
@@ -50,6 +51,7 @@ import {
   initTaskOutputAsSymlink,
 } from '../../utils/task/diskOutput.js'
 import { getCurrentWorktreeSession } from '../../utils/worktree.js'
+import { clearRawRequestSnapshot } from '../../services/api/rawRequestSnapshot.js'
 import { clearSessionCaches } from './caches.js'
 
 function notifyRemoteConversationCleared(): void {
@@ -154,7 +156,14 @@ export async function clearConversation({
   setLastAPIRequest(null)
   setLastAPIRequestMessages(null)
   setLastClassifierRequests(null)
+  clearRawRequestSnapshot()
   resetCostState()
+
+  // Drop the post-turn CacheSafeParams snapshot: it holds the pre-clear
+  // conversation's full message history. The session-id check in
+  // getLastCacheSafeParams would reject it anyway after regenerateSessionId
+  // below, but clearing here releases the memory immediately.
+  saveCacheSafeParams(null)
 
   setCwd(getOriginalCwd())
   readFileState.clear()

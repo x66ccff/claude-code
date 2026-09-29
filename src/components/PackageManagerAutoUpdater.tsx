@@ -98,7 +98,7 @@ export function PackageManagerAutoUpdater({ verbose }: Props): React.ReactNode {
     <>
       {verbose && (
         <Text dimColor wrap="truncate">
-          currentVersion: {MACRO.VERSION}
+          currentVersion: {MACRO.BUILD_VERSION}
         </Text>
       )}
       <Text color="warning" wrap="truncate">

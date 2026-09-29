@@ -1,7 +1,8 @@
+import { feature } from 'bun:bundle';
 import figures from 'figures';
 import * as React from 'react';
 import { useMemo, useRef } from 'react';
-import { Box, Text, useAnimationFrame, stringWidth, Byline } from '@anthropic/ink';
+import { Box, Text, useAnimationFrame, stringWidth, Byline, ProgressBar } from '@anthropic/ink';
 import { toInkColor } from '../../utils/ink.js';
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js';
 import { formatDuration, formatNumber } from '../../utils/format.js';
@@ -10,6 +11,7 @@ import type { Theme } from '../../utils/theme.js';
 
 import { GlimmerMessage } from './GlimmerMessage.js';
 import { SpinnerGlyph } from './SpinnerGlyph.js';
+import { ThinkingMarquee } from './ThinkingMarquee.js';
 import type { SpinnerMode } from './types.js';
 import { useStalledAnimation } from './useStalledAnimation.js';
 import { interpolateColor, toRGBColor } from './utils.js';
@@ -32,6 +34,20 @@ export type SpinnerAnimationRowProps = {
   reducedMotion: boolean;
   hasActiveTools: boolean;
   responseLengthRef: React.RefObject<number>;
+  /**
+   * Per-API-request metrics (one entry per request). OUTPUT_STATS reads the
+   * latest entry's firstTokenTime/responseLengthBaseline to derive a live
+   * tok/s estimate for the response currently streaming.
+   */
+  apiMetricsRef?: React.RefObject<
+    Array<{
+      ttftMs: number;
+      firstTokenTime: number;
+      lastTokenTime: number;
+      responseLengthBaseline: number;
+      endResponseLength: number;
+    }>
+  >;
 
   // Message (stable within a turn)
   message: string;
@@ -48,6 +64,8 @@ export type SpinnerAnimationRowProps = {
   spinnerSuffix?: string | null;
   verbose: boolean;
   columns: number;
+  /** True while a compaction summary is streaming — renders a token progress bar. */
+  compactProgressActiveRef?: React.RefObject<boolean>;
 
   // Teammate-derived (computed by parent from tasks)
   hasRunningTeammates: boolean;
@@ -59,6 +77,9 @@ export type SpinnerAnimationRowProps = {
   // Thinking (state owned by parent, mode-dependent)
   thinkingStatus: 'thinking' | number | null;
   effortSuffix: string;
+
+  /** Live thinking / compaction text to render as a scrolling marquee line. */
+  marqueeText?: string | null;
 };
 
 /**
@@ -76,6 +97,7 @@ export function SpinnerAnimationRow({
   reducedMotion,
   hasActiveTools,
   responseLengthRef,
+  apiMetricsRef,
   message,
   messageColor,
   shimmerColor,
@@ -86,12 +108,14 @@ export function SpinnerAnimationRow({
   spinnerSuffix,
   verbose,
   columns,
+  compactProgressActiveRef,
   hasRunningTeammates,
   teammateTokens,
   foregroundedTeammate,
   leaderIsIdle = false,
   thinkingStatus,
   effortSuffix,
+  marqueeText = null,
 }: SpinnerAnimationRowProps): React.ReactNode {
   const [viewportRef, time] = useAnimationFrame(reducedMotion ? null : 50);
 
@@ -166,6 +190,29 @@ export function SpinnerAnimationRow({
   const displayedResponseLength = tokenCounterRef.current;
   const leaderTokens = Math.round(displayedResponseLength / 4);
 
+  // Use the last output timestamp so tool execution cannot dilute generation speed.
+  const liveSpeedRef = useRef<number | null>(null);
+  const liveSpeedAnchorRef = useRef<number>(0);
+  let liveTokPerSec: number | null = null;
+  if (feature('OUTPUT_STATS') && (mode === 'thinking' || mode === 'responding' || mode === 'tool-input')) {
+    const lastEntry = apiMetricsRef?.current.at(-1);
+    const firstTokenTime = lastEntry?.firstTokenTime ?? 0;
+    const baseline = lastEntry?.responseLengthBaseline ?? 0;
+    if (firstTokenTime !== liveSpeedAnchorRef.current) {
+      liveSpeedAnchorRef.current = firstTokenTime;
+      liveSpeedRef.current = null;
+    }
+    const tokensThisResponse = Math.max(0, (lastEntry?.endResponseLength ?? 0) - baseline) / 4;
+    const elapsedS = ((lastEntry?.lastTokenTime ?? 0) - firstTokenTime) / 1000;
+    if (tokensThisResponse >= 20 && elapsedS >= 1) {
+      const instant = tokensThisResponse / elapsedS;
+      const prev = liveSpeedRef.current;
+      liveSpeedRef.current = prev === null ? instant : prev * 0.8 + instant * 0.2;
+      liveTokPerSec = liveSpeedRef.current;
+    }
+  }
+  const speedSuffix = liveTokPerSec !== null ? ` \u00B7 ${Math.round(liveTokPerSec)} tok/s` : '';
+
   const effectiveElapsedMs = hasRunningTeammates ? Math.max(elapsedTimeMs, now - turnStartRef.current) : elapsedTimeMs;
   const timerText = formatDuration(effectiveElapsedMs);
   const timerWidth = stringWidth(timerText);
@@ -176,7 +223,9 @@ export function SpinnerAnimationRow({
       ? (foregroundedTeammate.progress?.tokenCount ?? 0)
       : leaderTokens + teammateTokens;
   const tokenCount = formatNumber(totalTokens);
-  const tokensText = hasRunningTeammates ? `${tokenCount} tokens` : `${figures.arrowDown} ${tokenCount} tokens`;
+  const tokensText = hasRunningTeammates
+    ? `${tokenCount} tokens${speedSuffix}`
+    : `${figures.arrowDown} ${tokenCount} tokens${speedSuffix}`;
   const tokensWidth = stringWidth(tokensText);
 
   // === Thinking text (may shrink to fit) ===
@@ -245,7 +294,9 @@ export function SpinnerAnimationRow({
       ? [
           <Box flexDirection="row" key="tokens">
             {!hasRunningTeammates && <SpinnerModeGlyph mode={mode} />}
-            <Text dimColor>{tokenCount} tokens</Text>
+            <Text dimColor>
+              {tokenCount} tokens{speedSuffix}
+            </Text>
           </Box>,
         ]
       : []),
@@ -283,7 +334,14 @@ export function SpinnerAnimationRow({
       )
     ) : null;
 
-  return (
+  // Compaction progress bar. Summary length is unknown up front, so map
+  // streamed tokens through an asymptotic curve (approaches but never reaches
+  // 100%) so it always reads as forward progress. Bar disappears on compact_end.
+  const isCompacting = compactProgressActiveRef?.current === true;
+  const compactRatio = isCompacting ? 1 - Math.exp(-leaderTokens / 1200) : 0;
+  const compactBarWidth = Math.max(10, Math.min(30, columns - 20));
+
+  const spinnerRow = (
     <Box ref={viewportRef} flexDirection="row" flexWrap="wrap" marginTop={1} width="100%">
       <SpinnerGlyph
         frame={frame}
@@ -302,6 +360,23 @@ export function SpinnerAnimationRow({
         stalledIntensity={overrideColor ? 0 : stalledIntensity}
       />
       {status}
+    </Box>
+  );
+
+  const marquee = marqueeText ? <ThinkingMarquee text={marqueeText} columns={columns} /> : null;
+
+  if (!isCompacting && !marquee) return spinnerRow;
+
+  return (
+    <Box flexDirection="column" width="100%">
+      {spinnerRow}
+      {marquee}
+      {isCompacting ? (
+        <Box flexDirection="row">
+          <ProgressBar ratio={compactRatio} width={compactBarWidth} fillColor={messageColor} />
+          <Text dimColor> {Math.round(compactRatio * 100)}%</Text>
+        </Box>
+      ) : null}
     </Box>
   );
 }

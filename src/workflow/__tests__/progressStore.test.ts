@@ -287,3 +287,45 @@ test('hydrate existing runId → skip (memory first, not overwritten by disk)', 
   expect(got.workflowName).toBe('live')
   expect(got.status).toBe('running')
 })
+
+test('agent_progress records activity + lastActivityAt; sticky across gaps; agent_done clears', () => {
+  const { bus, store } = newStore()
+  bus.emit({ type: 'run_started', runId: 'r1', workflowName: 'w', meta: null })
+  bus.emit({
+    type: 'agent_started',
+    runId: 'r1',
+    agentId: 0,
+    label: 'a',
+    phase: 'A',
+  })
+  bus.emit({
+    type: 'agent_progress',
+    runId: 'r1',
+    agentId: 0,
+    tokenCount: 10,
+    toolCount: 2,
+    activity: '⚙ Read {"file_path":"x"}',
+  })
+  const a = store.get('r1')!.agents[0]!
+  expect(a.activity).toBe('⚙ Read {"file_path":"x"}')
+  expect(typeof a.lastActivityAt).toBe('number')
+  // progress without activity: snapshot stays sticky (ticker survives tool gaps)
+  bus.emit({
+    type: 'agent_progress',
+    runId: 'r1',
+    agentId: 0,
+    tokenCount: 12,
+    toolCount: 3,
+  })
+  expect(store.get('r1')!.agents[0]!.activity).toBe('⚙ Read {"file_path":"x"}')
+  expect(store.get('r1')!.agents[0]!.tokenCount).toBe(12)
+  bus.emit({
+    type: 'agent_done',
+    runId: 'r1',
+    agentId: 0,
+    label: 'a',
+    phase: 'A',
+    result: ok('out'),
+  })
+  expect(store.get('r1')!.agents[0]!.activity).toBeUndefined()
+})

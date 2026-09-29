@@ -1,6 +1,8 @@
 import { parseSSEFrames } from 'src/cli/transports/SSETransport.js'
 import { errorMessage } from 'src/utils/errors.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
+import { RateLimitError } from '../rateLimitRetry.js'
+import { recordRawRequestBody } from '../rawRequestSnapshot.js'
 import type {
   GeminiGenerateContentRequest,
   GeminiStreamChunk,
@@ -28,9 +30,14 @@ export async function* streamGeminiGenerateContent(params: {
   body: GeminiGenerateContentRequest
   signal: AbortSignal
   fetchOverride?: typeof fetch
+  captureRawRequest?: boolean
 }): AsyncGenerator<GeminiStreamChunk, void> {
   const fetchImpl = params.fetchOverride ?? fetch
   const url = `${getGeminiBaseUrl()}/${getGeminiModelPath(params.model)}:streamGenerateContent?alt=sse`
+  const body = JSON.stringify(params.body)
+  if (params.captureRawRequest) {
+    recordRawRequestBody('gemini', body)
+  }
 
   const response = await fetchImpl(url, {
     method: 'POST',
@@ -38,15 +45,18 @@ export async function* streamGeminiGenerateContent(params: {
       'Content-Type': 'application/json',
       'x-goog-api-key': process.env.GEMINI_API_KEY || '',
     },
-    body: JSON.stringify(params.body),
+    body,
     signal: params.signal,
     ...getProxyFetchOptions({ forAnthropicAPI: false }),
   })
 
   if (!response.ok) {
     const body = await response.text()
-    throw new Error(
+    // Structured error so 429/RESOURCE_EXHAUSTED are recognized by the
+    // unified rate-limit policy.
+    throw new RateLimitError(
       `Gemini API request failed (${response.status} ${response.statusText}): ${body || 'empty response body'}`,
+      { status: response.status },
     )
   }
 

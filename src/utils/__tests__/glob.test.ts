@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { extractGlobBaseDirectory } from '../glob'
+import {
+  extractGlobBaseDirectory,
+  getMacOSHomePrivacyExclusions,
+} from '../glob'
 
 describe('extractGlobBaseDirectory', () => {
   test('extracts base dir from glob with *', () => {
@@ -36,5 +39,46 @@ describe('extractGlobBaseDirectory', () => {
     const result = extractGlobBaseDirectory('src/?.ts')
     expect(result.baseDir).toBe('src')
     expect(result.relativePattern).toBe('?.ts')
+  })
+})
+
+describe('getMacOSHomePrivacyExclusions', () => {
+  test('excludes macOS app-data directories for broad home globs', () => {
+    expect(
+      getMacOSHomePrivacyExclusions(
+        '/Users/test',
+        '**/*',
+        '/Users/test',
+        'macos',
+      ),
+    ).toEqual(['!Library/**', '!.Trash/**'])
+  })
+
+  test('excludes a nested home when searching above it', () => {
+    expect(
+      getMacOSHomePrivacyExclusions('/Users', '**/*', '/Users/test', 'macos'),
+    ).toEqual(['!test/Library/**', '!test/.Trash/**'])
+  })
+
+  test('allows an explicitly targeted privacy directory', () => {
+    expect(
+      getMacOSHomePrivacyExclusions(
+        '/Users/test',
+        'Library/**/*.plist',
+        '/Users/test',
+        'macos',
+      ),
+    ).toEqual(['!.Trash/**'])
+  })
+
+  test('does not add macOS exclusions on other platforms', () => {
+    expect(
+      getMacOSHomePrivacyExclusions(
+        '/home/test',
+        '**/*',
+        '/home/test',
+        'linux',
+      ),
+    ).toEqual([])
   })
 })

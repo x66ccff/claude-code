@@ -16,6 +16,14 @@ export type AgentProgress = {
   tokenCount?: number
   /** Cumulative tool-call count (live via agent_progress / final value settled by agent_done). */
   toolCount?: number
+  /**
+   * Latest activity snapshot (tail of thinking / assistant text / formatted
+   * tool call) for the panel marquee; undefined until first assistant content,
+   * cleared when the agent finishes.
+   */
+  activity?: string
+  /** Wall-clock ms of the last agent_progress update; panel flags stalls from it. */
+  lastActivityAt?: number
 }
 
 export type RunProgress = {
@@ -130,6 +138,8 @@ export function createProgressStoreFromBus(bus: ProgressBus): ProgressStore {
         if (ap) {
           ap.tokenCount = event.tokenCount
           ap.toolCount = event.toolCount
+          if (event.activity !== undefined) ap.activity = event.activity
+          ap.lastActivityAt = Date.now()
         }
         break
       }
@@ -159,6 +169,8 @@ export function createProgressStoreFromBus(bus: ProgressBus): ProgressStore {
         } else {
           a.status = 'done'
           a.resultKind = event.result.kind
+          // Marquee only applies to running agents; clear so the done row stays clean.
+          a.activity = undefined
           if (event.result.kind === 'ok') {
             a.outputShape =
               typeof event.result.output === 'object' &&

@@ -499,6 +499,47 @@ describe('normalizeMessages', () => {
     const normalized = normalizeMessages([msg])
     expect(normalized.length).toBe(1)
   })
+
+  test('preserves streamStats through normalization (shared reference)', () => {
+    const msg = makeAssistantMsg([
+      { type: 'text', text: 'first' },
+      { type: 'text', text: 'second' },
+    ])
+    msg.streamStats = {
+      firstDeltaMs: 1000,
+      endMs: 3000,
+      tokensPerSec: 42,
+      requestStartMs: 500,
+    }
+    const normalized = normalizeMessages([msg]) as AssistantMessage[]
+    expect(normalized.length).toBe(2)
+    for (const n of normalized) {
+      expect(n.streamStats).toBeDefined()
+      expect(n.streamStats?.tokensPerSec).toBe(42)
+      // Same object reference: in-place mutations from the streaming
+      // message_delta handler must propagate without re-normalization.
+      expect(n.streamStats).toBe(msg.streamStats)
+    }
+    msg.streamStats.tokensPerSec = 61.6
+    expect(normalized[0].streamStats?.tokensPerSec).toBe(61.6)
+  })
+
+  test('preserves toolDurationMs on tool_result user messages', () => {
+    const msg = createUserMessage({
+      content: [
+        {
+          type: 'tool_result',
+          content: 'ok',
+          tool_use_id: 'tool-1',
+        } as any,
+      ],
+      toolUseResult: { data: 'ok' },
+      toolDurationMs: 2100,
+    })
+    const normalized = normalizeMessages([msg])
+    expect(normalized.length).toBe(1)
+    expect((normalized[0] as UserMessage).toolDurationMs).toBe(2100)
+  })
 })
 
 describe('normalizeMessagesForAPI', () => {

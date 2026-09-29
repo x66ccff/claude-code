@@ -1538,6 +1538,10 @@ async function checkPermissionsAndCallTool(
               : toolUseResult,
           mcpMeta: toolUseContext.agentId ? undefined : mcpMeta,
           sourceToolAssistantUUID: assistantMessage.uuid,
+          // OUTPUT_STATS: wall-clock tool duration (measured at :durationMs
+          // above, closure-captured). Top-level field so it persists to the
+          // transcript; rendered as a gray `(2.1s)` suffix on the result row.
+          toolDurationMs: durationMs,
         }),
         contextModifier: toolContextModifier
           ? {
@@ -1817,6 +1821,9 @@ async function checkPermissionsAndCallTool(
               ? error.mcpMeta
               : undefined,
           sourceToolAssistantUUID: assistantMessage.uuid,
+          // OUTPUT_STATS: duration of the failed/interrupted run (catch-block
+          // durationMs). Aborts get their real elapsed time too.
+          toolDurationMs: durationMs,
         }),
       },
       ...hookMessages,

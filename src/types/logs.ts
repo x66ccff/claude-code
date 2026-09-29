@@ -14,6 +14,7 @@ export type SerializedMessage = Message & {
   version: string
   gitBranch?: string
   slug?: string // Session slug for files like plans (used for resume)
+  hostname?: string // Machine hostname at creation time; only recorded on linux dsw*/dlc* (PAI) hosts
 }
 
 export type LogOption = {
@@ -43,6 +44,7 @@ export type LogOption = {
   contextCollapseCommits?: ContextCollapseCommitEntry[] // Ordered — commit B may reference commit A's summary
   contextCollapseSnapshot?: ContextCollapseSnapshotEntry // Last-wins — staged queue + spawn state
   gitBranch?: string // Git branch at the end of the session
+  hostname?: string // Original machine hostname (recorded only on dsw/dlc linux hosts; absent for older sessions)
   projectPath?: string // Original project directory path
   prNumber?: number // GitHub PR number linked to this session
   prUrl?: string // Full URL to the linked PR

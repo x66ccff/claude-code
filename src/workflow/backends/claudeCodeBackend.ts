@@ -31,12 +31,21 @@ import type { ModelAlias } from '../../utils/model/aliases.js'
 import type { Message } from '../../types/message.js'
 import type { ToolUseContext } from '../../Tool.js'
 import { readHostBundle } from '../hostHandle.js'
+import { describeAssistantActivity } from '../activityText.js'
+// [workflow-turn-limit patch]
+import { workflowAgentMaxTurns } from '../turnLimits.js'
+// [end workflow-turn-limit patch]
 
 /** Fallback definition for workflow subagents (used when agentType does not match a real registry entry). */
 export const WORKFLOW_AGENT: BuiltInAgentDefinition = {
   agentType: 'workflow-worker',
   whenToUse: 'subtask dispatched by the agent() hook inside a workflow script',
   tools: ['*'],
+  // [workflow-turn-limit patch] cap agentic turns (default 60, env CCB_WORKFLOW_AGENT_MAX_TURNS);
+  // runAgent passes agentDefinition.maxTurns into the query loop (runAgent.ts: `maxTurns ?? agentDefinition.maxTurns`);
+  // exceeding it ends ONLY this agent gracefully via the stock max_turns_reached path — the workflow keeps running.
+  maxTurns: workflowAgentMaxTurns(),
+  // [end workflow-turn-limit patch]
   source: 'built-in',
   baseDir: 'built-in',
   getSystemPrompt: () =>
@@ -292,6 +301,8 @@ export const claudeCodeBackend: AgentAdapter = {
     // Accumulate running progress (onProgress push -> agent_progress event -> panel refreshes token/tool in real time).
     let tokenCount = 0
     let toolCount = 0
+    // Sticky marquee snapshot (tail of thinking/text/tool call) for the panel ticker.
+    let lastActivity: string | undefined
 
     try {
       await runInCwd(async () => {
@@ -318,12 +329,22 @@ export const claudeCodeBackend: AgentAdapter = {
               | undefined
             if (usage) tokenCount = getTokenCountFromUsage(usage)
             const content = msg.message.content as
-              | Array<{ type: string }>
+              | Array<Record<string, unknown>>
               | undefined
-            if (content)
+            if (content) {
               toolCount += content.filter(b => b.type === 'tool_use').length
+              // Sticky marquee snapshot: only overwrite when this message
+              // carries visible content, so the ticker keeps showing the last
+              // tool call across tool-execution gaps (messages without blocks).
+              const act = describeAssistantActivity(content)
+              if (act) lastActivity = act
+            }
           }
-          ctx.onProgress?.({ tokenCount, toolCount })
+          ctx.onProgress?.({
+            tokenCount,
+            toolCount,
+            ...(lastActivity ? { activity: lastActivity } : {}),
+          })
         }
       })
     } catch (e) {

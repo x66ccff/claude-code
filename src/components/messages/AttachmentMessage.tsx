@@ -319,6 +319,37 @@ export function AttachmentMessage({ attachment, addMargin, verbose, isTranscript
       // The skill success message is rendered by SkillTool's renderToolResultMessage,
       // so we don't render anything here to avoid duplicate messages.
       return null;
+    case 'hook_execution': {
+      const duration =
+        attachment.durationMs >= 1000 ? `${(attachment.durationMs / 1000).toFixed(1)}s` : `${attachment.durationMs}ms`;
+      const color =
+        attachment.outcome === 'success' ? undefined : attachment.outcome === 'rejected' ? 'warning' : 'error';
+      const showDetails = verbose || isTranscriptMode;
+      const showFailureSummary =
+        !showDetails && !attachment.suppressOutput && attachment.outcome !== 'success' && attachment.stderr;
+      return (
+        <Box flexDirection="column">
+          <Line color={color}>
+            Hook {attachment.hookEvent} · {attachment.hookSource} · {attachment.hookType} · {attachment.outcome} ·{' '}
+            {duration}
+          </Line>
+          {showFailureSummary ? (
+            <Line color={color}>
+              {attachment.exitCode !== undefined ? `exit ${attachment.exitCode}: ` : ''}
+              {attachment.stderr}
+            </Line>
+          ) : null}
+          {showDetails && attachment.displayInput ? <Line>input: {attachment.displayInput}</Line> : null}
+          {showDetails && attachment.exitCode !== undefined ? <Line>exit: {attachment.exitCode}</Line> : null}
+          {showDetails && !attachment.suppressOutput && attachment.stdout ? (
+            <Line>stdout: {attachment.stdout}</Line>
+          ) : null}
+          {showDetails && !attachment.suppressOutput && attachment.stderr ? (
+            <Line color={color}>stderr: {attachment.stderr}</Line>
+          ) : null}
+        </Box>
+      );
+    }
     case 'async_hook_response': {
       // SessionStart hook completions are only shown in verbose mode
       if (attachment.hookEvent === 'SessionStart' && !verbose) {

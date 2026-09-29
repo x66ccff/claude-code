@@ -306,10 +306,10 @@ slave 执行需要权限的工具时（如 BashTool），权限请求自动转�
 
 **局域网多机器**：
 ```bash
-# 机器 A (192.168.50.22)
+# 机器 A (192.0.2.10)
 bun run dev
 
-# 机器 B (192.168.50.27)
+# 机器 B (192.0.2.20)
 bun run dev
 
 # 两边启动后 3-5 秒自动发现和 attach
@@ -343,7 +343,7 @@ sudo firewall-cmd --reload
 Routed to [sub-1]; main can continue other tasks
 
 # LAN peer
-Routed to [main] vmwin11/192.168.50.27; main can continue other tasks
+Routed to [main] host-b/192.0.2.20; main can continue other tasks
 ```
 
 ---

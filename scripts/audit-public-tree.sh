@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Keep Git Bash from rewriting regex arguments passed to native git/rg.
+export MSYS_NO_PATHCONV=1
+
+for required in git rg; do
+    command -v "$required" >/dev/null || {
+        printf 'public audit: required command unavailable: %s\n' "$required" >&2
+        exit 2
+    }
+done
+
 root=${1:-.}
 root=$(realpath "$root")
+if command -v cygpath >/dev/null; then
+    root=$(cygpath -m "$root")
+fi
 
 if ! git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     printf 'public audit: %s is not a Git working tree\n' "$root" >&2
@@ -24,13 +37,14 @@ report_paths() {
 
 tracked_private_paths() {
     git -C "$root" ls-files | \
-        rg '^(\.claude|\.codex|\.agents)/|(^|/)(credentials\.json|\.env($|\.)|[^/]+\.(pem|p12|pfx))$' | \
+        rg '^(\.claude|\.codex|\.agents|teach-me)/|(^|/)(credentials\.json|settings\.local\.json|CLAUDE\.local\.md|\.env($|\.[^/]+)|[^/]+\.(pem|p12|pfx|key))$' | \
+        rg -v '(^|/)\.env\.example$' | \
         rg -v '^(\.claude/agents/hello-agent\.md|\.claude/skills/interview/SKILL\.md|\.claude/skills/teach-me/SKILL\.md|\.claude/skills/teach-me/references/pedagogy\.md)$'
 }
 
 credential_paths() {
     local file line content token
-    git -C "$root" grep -InE "$secret_pattern" -- . 2>/dev/null | \
+    git -C "$root" grep --cached -InE "$secret_pattern" -- . 2>/dev/null | \
         while IFS=: read -r file line content; do
             while IFS= read -r token; do
                 # AWS publishes this exact value as a non-secret example in
@@ -58,10 +72,11 @@ report_paths 'credential-shaped content found (filenames only)' \
 # ports, or other machine identifiers that generic secret regexes cannot know.
 deny_file=${PUBLIC_AUDIT_DENY_FILE:-}
 if [[ -n "$deny_file" && -r "$deny_file" ]]; then
-    while IFS= read -r literal; do
+    while IFS= read -r literal || [[ -n "$literal" ]]; do
+        literal=${literal%$'\r'}
         [[ -z "$literal" || "$literal" == \#* ]] && continue
         report_paths 'machine-local marker found (filenames only)' \
-            git -C "$root" grep -IlF -e "$literal" -- .
+            git -C "$root" grep --cached -IlF -e "$literal" -- .
     done <"$deny_file"
 fi
 

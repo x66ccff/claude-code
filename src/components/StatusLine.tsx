@@ -179,6 +179,7 @@ function GoalPill(): React.ReactNode {
     case 'paused':
     case 'budget_limited':
     case 'usage_limited':
+    case 'max_turns':
       statusNode = <Text color="ansi:yellow">{statusLabel}</Text>;
       break;
     case 'blocked':

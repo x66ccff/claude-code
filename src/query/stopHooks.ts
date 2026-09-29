@@ -47,12 +47,11 @@ const jobClassifierModule = feature('TEMPLATES')
 
 import type { QuerySource } from '../constants/querySource.js'
 import { executeAutoDream } from '../services/autoDream/autoDream.js'
+import { isNearAutoCompactThreshold } from '../services/compact/autoCompact.js'
 import { executePromptSuggestion } from '../services/PromptSuggestion/promptSuggestion.js'
 import { isBareMode, isEnvDefinedFalsy } from '../utils/envUtils.js'
-import {
-  createCacheSafeParams,
-  saveCacheSafeParams,
-} from '../utils/forkedAgent.js'
+import { saveCacheSafeParams } from '../utils/cacheSafeParamsSlot.js'
+import { createCacheSafeParams } from '../utils/forkedAgent.js'
 
 type StopHookResult = {
   blockingErrors: Message[]
@@ -134,7 +133,17 @@ export async function* handleStopHooks(
   const poorMode = feature('POOR')
     ? (await import('../commands/poor/poorMode.js')).isPoorModeActive()
     : false
-  if (!isBareMode()) {
+  // Near the autocompact threshold, defer ALL turn-end background forks.
+  // These are fire-and-forget full-history requests: close to the threshold
+  // they are slow, still in flight when the next turn's autocompact fires
+  // (two concurrent large API requests), and their streamed text leaks into
+  // the compaction UI. Compaction replaces the history anyway, so skipping
+  // a cycle costs nothing (extraction cursors only advance on success).
+  const nearAutoCompact = isNearAutoCompactThreshold(
+    stopHookContext.messages,
+    toolUseContext.options.mainLoopModel,
+  )
+  if (!isBareMode() && !nearAutoCompact) {
     // Inline env check for dead code elimination in external builds
     if (
       !isEnvDefinedFalsy(process.env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION) &&

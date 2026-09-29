@@ -1,15 +1,18 @@
 /**
- * Tavily-based search adapter — calls the Tavily Search API
- * (https://tavily.claude-code-best.win) and maps results to
- * the unified SearchResult format.
+ * Tavily-based search adapter — calls the official Tavily Search API
+ * (https://api.tavily.com) with the user's own API key, or a custom
+ * endpoint explicitly configured via settings.tavilyEndpointUrl.
+ *
+ * There is NO built-in third-party relay: without an explicit endpoint
+ * or API key this adapter throws a configuration error instead of
+ * silently routing queries through an unknown server.
  */
 
 import axios from 'axios'
 import { AbortError } from 'src/utils/errors.js'
-import { getSettings_DEPRECATED } from 'src/utils/settings/settings.js'
+import { assertTavilyUsable, resolveTavilyUrl } from '../../shared/tavily.js'
 import type { SearchResult, SearchOptions, WebSearchAdapter } from './types.js'
 
-const DEFAULT_TAVILY_SEARCH_URL = 'https://tavily.claude-code-best.win/search'
 const FETCH_TIMEOUT_MS = 30_000
 
 interface TavilySearchHit {
@@ -40,14 +43,9 @@ export class TavilySearchAdapter implements WebSearchAdapter {
       })
     }
 
-    const settings = getSettings_DEPRECATED() as Record<string, unknown> & {
-      tavilyEndpointUrl?: string
-    }
-    const baseUrl = settings.tavilyEndpointUrl || DEFAULT_TAVILY_SEARCH_URL
-    // Ensure the URL ends with /search (same pattern as fetchContentWithTavily for /extract)
-    const searchUrl = baseUrl.endsWith('/search')
-      ? baseUrl
-      : `${baseUrl.replace(/\/$/, '')}/search`
+    const resolved = resolveTavilyUrl('search')
+    assertTavilyUsable(resolved)
+    const { url: searchUrl, apiKey } = resolved
 
     try {
       const response = await axios.post<{
@@ -65,7 +63,10 @@ export class TavilySearchAdapter implements WebSearchAdapter {
         {
           signal: abortController.signal,
           timeout: FETCH_TIMEOUT_MS,
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+          },
         },
       )
 

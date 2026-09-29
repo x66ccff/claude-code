@@ -52,10 +52,10 @@ sudo iptables -A INPUT -p tcp --dport 1024:65535 -m owner --uid-owner $(id -u) -
 ### 第二步：启动
 
 ```bash
-# 机器 A（例如 192.168.50.22）
+# 机器 A（例如 192.0.2.10）
 bun run dev
 
-# 机器 B（例如 192.168.50.27）
+# 机器 B（例如 192.0.2.20）
 bun run dev
 ```
 
@@ -70,14 +70,14 @@ bun run dev
 
 输出示例：
 ```
-pipe: cli-a91bad56 (main) 192.168.50.22  2/3 selected
+pipe: cli-a91bad56 (main) 192.0.2.10  2/3 selected
 
 Main machine: 205d6c3a... (this machine)
-  [main] cli-a91bad56  XC/192.168.50.22  [alive] (you)
-  ☑ [sub-1] cli-da029538  XC/192.168.50.22  [alive] [connected]
+  [main] cli-a91bad56  host-a/192.0.2.10  [alive] (you)
+  ☑ [sub-1] cli-da029538  host-a/192.0.2.10  [alive] [connected]
 
 LAN Peers:
-  ☐ [main] cli-04d67950  vmwin11/192.168.50.27  tcp:192.168.50.27:58853  [LAN]
+  ☐ [main] cli-04d67950  host-b/192.0.2.20  tcp:192.0.2.20:58853  [LAN]
 ```
 
 ### 第四步：选中目标并发送任务
@@ -90,8 +90,8 @@ LAN Peers:
 
 远端执行结果会流式回传到你的消息列表：
 ```
-[main vmwin11/192.168.50.27 / cli-04d67950] 正在检查 git status...
-[main vmwin11/192.168.50.27 / cli-04d67950] Completed
+[main host-b/192.0.2.20 / cli-04d67950] 正在检查 git status...
+[main host-b/192.0.2.20 / cli-04d67950] Completed
 ```
 
 ## 完整命令参考

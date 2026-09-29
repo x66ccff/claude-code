@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Message } from '../../types/message.js'
+import { splitUsedTokensIntoSegments } from '../../utils/contextEstimation.js'
 import { getContextMeterData } from '../ContextUsageBar.js'
 
 function assistantMessage(usage: {
@@ -33,14 +34,37 @@ function assistantMessage(usage: {
         },
       },
     },
+  } as Message
+}
+
+// CLAUDE_CODE_MAX_CONTEXT_TOKENS override in getContextWindowForModel applies
+// for all users (no longer ant-gated) — set it so the env override applies
+// deterministically regardless of the host model mapping. USER_TYPE is pinned
+// to 'ant' only to neutralize any ant-specific model resolution downstream.
+function withContextWindowOverride(tokens: string, fn: () => void): void {
+  const previousTokens = process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  const previousUserType = process.env.USER_TYPE
+  process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = tokens
+  process.env.USER_TYPE = 'ant'
+  try {
+    fn()
+  } finally {
+    if (previousTokens === undefined) {
+      delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+    } else {
+      process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = previousTokens
+    }
+    if (previousUserType === undefined) {
+      delete process.env.USER_TYPE
+    } else {
+      process.env.USER_TYPE = previousUserType
+    }
   }
 }
 
 describe('getContextMeterData', () => {
   test('uses the configured local context window and includes output tokens', () => {
-    const previous = process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
-    process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '131072'
-    try {
+    withContextWindowOverride('131072', () => {
       const data = getContextMeterData(
         [
           assistantMessage({
@@ -50,7 +74,7 @@ describe('getContextMeterData', () => {
             cache_read_input_tokens: 50_000,
           }),
         ],
-        '/models',
+        'test-model',
       )
 
       expect(data.contextWindowSize).toBe(131_072)
@@ -58,13 +82,7 @@ describe('getContextMeterData', () => {
       expect(data.usedPercentage).toBe(50)
       expect(data.cacheHitRate).toBe(77)
       expect(data.usedTokensEstimated).toBe(false)
-    } finally {
-      if (previous === undefined) {
-        delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
-      } else {
-        process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = previous
-      }
-    }
+    })
   })
 
   test('shows placeholders before the first response', () => {
@@ -76,9 +94,7 @@ describe('getContextMeterData', () => {
   })
 
   test('uses the post-compact estimate instead of stale pre-compact usage', () => {
-    const previous = process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
-    process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '100000'
-    try {
+    withContextWindowOverride('100000', () => {
       const data = getContextMeterData(
         [
           assistantMessage({
@@ -95,19 +111,58 @@ describe('getContextMeterData', () => {
             compactMetadata: { estimatedPostCompactTokens: 12_000 },
           } as Message,
         ],
-        '/models',
+        'test-model',
       )
 
       expect(data.usedTokens).toBe(12_000)
       expect(data.usedPercentage).toBe(12)
       expect(data.cacheHitRate).toBeNull()
       expect(data.usedTokensEstimated).toBe(true)
-    } finally {
-      if (previous === undefined) {
-        delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
-      } else {
-        process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = previous
-      }
-    }
+    })
+  })
+})
+
+describe('splitUsedTokensIntoSegments', () => {
+  test('messages get the remainder above the estimated overhead', () => {
+    const split = splitUsedTokensIntoSegments(50_000, {
+      systemTokens: 10_000,
+      toolsTokens: 15_000,
+      memoryTokens: 5_000,
+    })
+    expect(split.systemTokens).toBe(10_000)
+    expect(split.toolsTokens).toBe(15_000)
+    expect(split.memoryTokens).toBe(5_000)
+    expect(split.messagesTokens).toBe(20_000)
+  })
+
+  test('scales overhead down proportionally when estimate overshoots usage', () => {
+    const split = splitUsedTokensIntoSegments(10_000, {
+      systemTokens: 20_000,
+      toolsTokens: 10_000,
+      memoryTokens: 10_000,
+    })
+    expect(split.messagesTokens).toBe(0)
+    expect(Math.round(split.systemTokens)).toBe(5_000)
+    expect(Math.round(split.toolsTokens)).toBe(2_500)
+    expect(Math.round(split.memoryTokens)).toBe(2_500)
+  })
+
+  test('zero estimate puts everything into messages', () => {
+    const split = splitUsedTokensIntoSegments(42_000, {
+      systemTokens: 0,
+      toolsTokens: 0,
+      memoryTokens: 0,
+    })
+    expect(split.messagesTokens).toBe(42_000)
+    expect(split.systemTokens).toBe(0)
+  })
+
+  test('negative usage clamps messages to zero', () => {
+    const split = splitUsedTokensIntoSegments(-5, {
+      systemTokens: 0,
+      toolsTokens: 0,
+      memoryTokens: 0,
+    })
+    expect(split.messagesTokens).toBe(0)
   })
 })

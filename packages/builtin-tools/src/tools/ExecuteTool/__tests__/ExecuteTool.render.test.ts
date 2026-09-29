@@ -80,7 +80,7 @@ describe('ExecuteTool.renderToolResultMessage delegation', () => {
       return 'RENDERED' as unknown as RenderResult
     }
     const innerTool = {
-      name: 'artifact',
+      name: 'mock_tool',
       renderToolResultMessage: innerRender,
     }
     const tools = [innerTool] as never
@@ -92,13 +92,13 @@ describe('ExecuteTool.renderToolResultMessage delegation', () => {
           url: 'https://example.com/x.html',
           expiresAt: 'T',
         },
-        tool_name: 'artifact',
+        tool_name: 'mock_tool',
       },
       [],
       {
         tools,
         input: {
-          tool_name: 'artifact',
+          tool_name: 'mock_tool',
           params: { file_path: '/tmp/x.html', ttl: 7 },
         },
       } as never,
@@ -143,7 +143,7 @@ describe('ExecuteTool.renderToolResultMessage delegation', () => {
   test('passes through undefined input safely when input is missing', () => {
     const seen: unknown[] = []
     const innerTool = {
-      name: 'artifact',
+      name: 'mock_tool',
       renderToolResultMessage: (
         _content: unknown,
         _progress: unknown,
@@ -156,7 +156,7 @@ describe('ExecuteTool.renderToolResultMessage delegation', () => {
     const tools = [innerTool] as never
 
     const result = ExecuteTool.renderToolResultMessage(
-      { result: { ok: true }, tool_name: 'artifact' },
+      { result: { ok: true }, tool_name: 'mock_tool' },
       [],
       { tools } as never,
     )

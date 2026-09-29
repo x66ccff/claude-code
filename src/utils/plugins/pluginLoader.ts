@@ -73,6 +73,7 @@ import { getFsImplementation } from '../fsOperations.js'
 import { gitExe } from '../git.js'
 import { lazySchema } from '../lazySchema.js'
 import { logError } from '../log.js'
+import { findBlockedMacosInjection } from '../hooks/platformHookPolicy.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
 import {
   clearPluginSettingsBase,
@@ -3188,6 +3189,25 @@ async function assemblePluginLoadResult(
     ...sessionResult.errors,
     ...mergeErrors,
   ]
+
+  for (const plugin of allPlugins) {
+    if (!plugin.enabled) continue
+    const policyMatch = findBlockedMacosInjection({
+      name: plugin.name,
+      id: plugin.source,
+      root: plugin.path,
+      source: plugin.repository,
+    })
+    if (!policyMatch) continue
+
+    plugin.enabled = false
+    allErrors.push({
+      type: 'generic-error',
+      source: plugin.source,
+      plugin: plugin.name,
+      error: `Plugin "${plugin.name}" rejected by macOS policy: ${policyMatch.field} contains "${policyMatch.keyword}"`,
+    })
+  }
 
   // Verify dependencies. Runs AFTER the parallel load — deps are presence
   // checks, not load-order, so no topological sort needed. Demotion is

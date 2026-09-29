@@ -15,10 +15,13 @@ import { resetMicrocompactState } from './microCompact.js'
  * components. Called during runPostCompactCleanup() so instance-scoped state
  * (e.g. contentReplacementState) is freed alongside module-level caches.
  */
-const compactCleanupCallbacks: Array<() => void> = []
+const compactCleanupCallbacks = new Set<() => void>()
 
-export function registerCompactCleanup(callback: () => void): void {
-  compactCleanupCallbacks.push(callback)
+export function registerCompactCleanup(callback: () => void): () => void {
+  compactCleanupCallbacks.add(callback)
+  return () => {
+    compactCleanupCallbacks.delete(callback)
+  }
 }
 
 /**
@@ -99,11 +102,13 @@ export function runPostCompactCleanup(querySource?: QuerySource): void {
       })
   }
   clearSessionMessagesCache()
-  for (const cb of compactCleanupCallbacks) {
-    try {
-      cb()
-    } catch (error) {
-      logError(error)
+  if (isMainThreadCompact) {
+    for (const cb of compactCleanupCallbacks) {
+      try {
+        cb()
+      } catch (error) {
+        logError(error)
+      }
     }
   }
 }

@@ -1,12 +1,18 @@
 import React from 'react';
 import { Box, Text, useAnimationFrame } from '@anthropic/ink';
 import type { Theme } from '@anthropic/ink';
+import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { ThinkingMarquee } from '../../components/Spinner/ThinkingMarquee.js';
 import type { AgentProgress } from '../progress/store.js';
 import { agentMetaText, agentVisual } from './status.js';
 
 const SPINNER_FRAMES = ['·', '✢', '✱', '✶', '✻', '✽'];
 const FRAME_MS = 120;
 const LABEL_MAX = 18;
+/** A running agent with no activity snapshot this long is flagged as stalled (idle Ns prefix + ⏸ mark). */
+const STALL_MS = 60_000;
+/** Marquee indent under the agent row (mark + space). */
+const MARQUEE_INDENT = 2;
 
 /**
  * Truncate the label to at most max characters. Preserves the trailing `#number` suffix (the audit workflow
@@ -43,6 +49,10 @@ export function AgentList({
   // Subscribe once to the animation frame at the top level: all running agents share the same frame (synchronized animation, avoids a per-row hook).
   const [ref, time] = useAnimationFrame(FRAME_MS);
   const frame = SPINNER_FRAMES[Math.floor(time / FRAME_MS) % SPINNER_FRAMES.length];
+  const { columns } = useTerminalSize();
+  // Wall clock sampled per animation tick (120ms): stall detection compares it
+  // against lastActivityAt (Date.now based) from the store.
+  const now = Date.now();
 
   if (agents.length === 0) {
     return <Text color="subtle">(no agents in this phase)</Text>;
@@ -54,16 +64,33 @@ export function AgentList({
         const selected = i === selectedIndex;
         const highlighted = selected && focused;
         const running = a.status === 'running';
-        const mark = running ? frame : v.mark;
+        // Stall: running but no progress snapshot for STALL_MS -> ⏸ mark in
+        // error color + `idle Ns` prefix on the marquee, so a wedged agent is
+        // visible at a glance instead of spinning forever.
+        const idleMs = running && a.lastActivityAt !== undefined ? now - a.lastActivityAt : 0;
+        const stalled = idleMs > STALL_MS;
+        const mark = stalled ? '⏸' : running ? frame : v.mark;
+        const markColor = stalled ? 'error' : v.color;
         const label = truncateLabel(a.label ?? `agent-${a.id}`, LABEL_MAX);
+        const marqueeText =
+          running && a.activity
+            ? stalled
+              ? `⚠ idle ${Math.floor(idleMs / 1000)}s · ${a.activity}`
+              : a.activity
+            : null;
         return (
-          <Box key={a.id} backgroundColor={highlighted ? 'selectionBg' : undefined} justifyContent="space-between">
-            <Box>
-              <Text color={v.color as keyof Theme}>{mark}</Text>
-              <Text> {label}</Text>
+          <React.Fragment key={a.id}>
+            <Box backgroundColor={highlighted ? 'selectionBg' : undefined} justifyContent="space-between">
+              <Box>
+                <Text color={markColor as keyof Theme}>{mark}</Text>
+                <Text> {label}</Text>
+              </Box>
+              <Text color="subtle">{agentMetaText(a)}</Text>
             </Box>
-            <Text color="subtle">{agentMetaText(a)}</Text>
-          </Box>
+            {marqueeText ? (
+              <ThinkingMarquee text={marqueeText} columns={Math.max(12, columns - MARQUEE_INDENT)} />
+            ) : null}
+          </React.Fragment>
         );
       })}
     </Box>

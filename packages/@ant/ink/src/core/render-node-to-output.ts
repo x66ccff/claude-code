@@ -715,6 +715,20 @@ function renderNodeToOutput(
         // follow check compares against last frame's max.
         const prevScrollHeight = node.scrollHeight ?? scrollHeight
         const prevInnerHeight = node.scrollViewportHeight ?? innerHeight
+        // [ccb mod] Sibling-resize transition-frame backstop (freeze-on-newline
+        // bug): when the scroll viewport's height changes between frames (e.g.
+        // multi-line input newline → bottom slot grows → ScrollBox shrinks),
+        // the cached-clear + clip-and-cull + setCellAt damage union can miss
+        // boundary transition cells — and on cache-drop/blit edges the
+        // container's own positionChanged witness may not fire, leaving the
+        // frame with a zero/insufficient diff while frontFrame swaps anyway
+        // (screen frozen on the old frame until a resize forces a full
+        // repaint). Mark layoutShifted so ink.tsx's didLayoutShift()
+        // full-damage backstop covers the whole frame. Cheap: fires only on
+        // genuine viewport-height transitions, not steady-state frames.
+        if (prevInnerHeight !== innerHeight) {
+          layoutShifted = true
+        }
         node.scrollHeight = scrollHeight
         node.scrollViewportHeight = innerHeight
         // Absolute screen-buffer row where the scrollable area (inside
@@ -850,6 +864,13 @@ function renderNodeToOutput(
         scrollTop = clamped
 
         if (content && contentYoga) {
+          // Full paints and row shifts must share the same viewport, excluding padding.
+          output.clip({
+            x1: undefined,
+            x2: undefined,
+            y1: (y1 ?? y) + padTop,
+            y2: (y1 ?? y) + padTop + innerHeight,
+          })
           // Compute content wrapper's absolute render position with scroll
           // offset applied, then render its children with culling.
           const contentX = x + contentYoga.getComputedLeft()
@@ -940,6 +961,14 @@ function renderNodeToOutput(
             const dirtyChildren = content.dirty
               ? new Set(content.childNodes.filter(c => (c as DOMElement).dirty))
               : null
+            const previousLayouts = dirtyChildren
+              ? new Map(
+                  content.childNodes.map(c => [
+                    c,
+                    nodeCache.get(c as DOMElement),
+                  ]),
+                )
+              : null
             renderScrolledChildren(
               content,
               output,
@@ -975,37 +1004,22 @@ function renderNodeToOutput(
               const edgeTopLocal = edgeTop - contentY
               const edgeBottomLocal = edgeBottom + 1 - contentY
               const spaces = ' '.repeat(w)
-              // Track cumulative height change of children iterated so far.
-              // A clean child's yogaTop is unchanged iff this is zero (no
-              // sibling above it grew/shrank/mounted). When zero, the skip
-              // check cached.y−delta === screenY reduces to delta === delta
-              // (tautology) → skip without yoga reads. Restores O(dirty)
-              // that #24536 traded away: for bottom-append the dirty child
-              // is last (all clean children skip); for virtual-scroll range
-              // shift the topSpacer shrink + new-item heights self-balance
-              // to zero before reaching the clean block. Middle-growth
-              // leaves shift non-zero → clean children after the growth
-              // point fall through to yoga + the fine-grained check below,
-              // preserving the ghost-box fix.
-              let cumHeightShift = 0
               for (const childNode of content.childNodes) {
                 const childElem = childNode as DOMElement
                 const isDirty = dirtyChildren.has(childNode)
-                if (!isDirty && cumHeightShift === 0) {
-                  if (nodeCache.has(childElem)) continue
-                  // Uncached = culled last frame, now re-entering. blit
-                  // never painted it → fall through to yoga + render.
-                  // Height unchanged (clean), so cumHeightShift stays 0.
-                }
                 const cy = childElem.yogaNode
                 if (!cy) continue
                 const childTop = cy.getComputedTop()
                 const childH = cy.getComputedHeight()
                 const childBottom = childTop + childH
-                if (isDirty) {
-                  const prev = nodeCache.get(childElem)
-                  cumHeightShift += childH - (prev ? prev.height : 0)
-                }
+                const previousLayout = previousLayouts?.get(childNode)
+                // Screen coordinates can lag many row shifts; local layout remains comparable.
+                if (
+                  !isDirty &&
+                  previousLayout?.top === childTop &&
+                  previousLayout.height === childH
+                )
+                  continue
                 // Skip culled children (outside viewport)
                 if (
                   childBottom <= scrollTop ||
@@ -1016,21 +1030,6 @@ function renderNodeToOutput(
                 if (childTop >= edgeTopLocal && childBottom <= edgeBottomLocal)
                   continue
                 const screenY = Math.floor(contentY + childTop)
-                // Clean children reaching here have cumHeightShift ≠ 0 OR
-                // no cache. Re-check precisely: cached.y − delta is where
-                // the shift left old pixels; if it equals new screenY the
-                // blit is correct (shift re-balanced at this child, or
-                // yogaTop happens to net out). No cache → blit never
-                // painted it → render.
-                if (!isDirty) {
-                  const childCached = nodeCache.get(childElem)
-                  if (
-                    childCached &&
-                    Math.floor(childCached.y) - delta === screenY
-                  ) {
-                    continue
-                  }
-                }
                 // Wipe this child's region with spaces to overwrite stale
                 // blitted content — output.clear() only expands damage and
                 // cannot zero cells that the blit already wrote.
@@ -1151,6 +1150,7 @@ function renderNodeToOutput(
             height: contentYoga.getComputedHeight(),
           })
           content.dirty = false
+          output.unclip()
         }
       } else {
         // Fill interior with background color before rendering children.
@@ -1390,40 +1390,13 @@ function renderScrolledChildren(
   preserveCulledCache = false,
 ): void {
   let seenDirtyChild = false
-  // Track cumulative height shift of dirty children iterated so far. When
-  // zero, a clean child's yogaTop is unchanged (no sibling above it grew),
-  // so cached.top is fresh and the cull check skips yoga. Bottom-append
-  // has the dirty child last → all prior clean children hit cache →
-  // O(dirty) not O(mounted). Middle-growth leaves shift non-zero after
-  // the dirty child → subsequent children yoga-read (needed for correct
-  // culling since their yogaTop shifted).
-  let cumHeightShift = 0
   for (const childNode of node.childNodes) {
     const childElem = childNode as DOMElement
     const cy = childElem.yogaNode
     if (cy) {
-      const cached = nodeCache.get(childElem)
-      let top: number
-      let height: number
-      if (
-        cached?.top !== undefined &&
-        !childElem.dirty &&
-        cumHeightShift === 0
-      ) {
-        top = cached.top
-        height = cached.height
-      } else {
-        top = cy.getComputedTop()
-        height = cy.getComputedHeight()
-        if (childElem.dirty) {
-          cumHeightShift += height - (cached ? cached.height : 0)
-        }
-        // Refresh cached top so next frame's cumShift===0 path stays
-        // correct. For culled children with preserveCulledCache=true this
-        // is the ONLY refresh point — without it, a middle-growth frame
-        // leaves stale tops that misfire next frame.
-        if (cached) cached.top = top
-      }
+      // Culled spacers have no paint cache, so cached sibling heights cannot establish layout shifts.
+      const top = cy.getComputedTop()
+      const height = cy.getComputedHeight()
       const bottom = top + height
       if (bottom <= scrollTopY || top >= scrollBottomY) {
         // Culled — outside visible window. Drop stale cache entries from

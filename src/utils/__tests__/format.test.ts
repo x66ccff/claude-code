@@ -8,6 +8,8 @@ import {
   formatRelativeTime,
   formatRelativeTimeAgo,
   formatLogMetadata,
+  formatTimeHHMMSS,
+  formatToolDuration,
 } from '../format'
 
 describe('formatFileSize', () => {
@@ -287,6 +289,27 @@ describe('formatLogMetadata', () => {
     expect(result).toContain('owner/repo#99')
   })
 
+  test('includes hostname as last segment when provided', () => {
+    const result = formatLogMetadata({
+      modified,
+      messageCount: 3,
+      gitBranch: 'main',
+      hostname: 'dsw-883935-74b9658444-624v7',
+    })
+    expect(result).toContain('dsw-883935-74b9658444-624v7')
+    expect(result.endsWith('dsw-883935-74b9658444-624v7')).toBe(true)
+  })
+
+  test('omits hostname segment when absent (pre-feature sessions)', () => {
+    const result = formatLogMetadata({
+      modified,
+      messageCount: 3,
+    })
+    expect(result).not.toContain('dsw')
+    // No dangling separator from the missing hostname segment
+    expect(result.endsWith(' · ')).toBe(false)
+  })
+
   test("parts are joined with ' · ' separator", () => {
     const result = formatLogMetadata({
       modified,
@@ -294,5 +317,48 @@ describe('formatLogMetadata', () => {
       gitBranch: 'feat/x',
     })
     expect(result).toContain(' · ')
+  })
+})
+
+describe('formatTimeHHMMSS', () => {
+  test('formats epoch ms in fixed GMT+8 regardless of machine timezone', () => {
+    // 2026-09-05T06:23:05Z == 14:23:05 Asia/Shanghai (GMT+8)
+    expect(formatTimeHHMMSS(Date.parse('2026-09-05T06:23:05Z'))).toBe(
+      '14:23:05',
+    )
+  })
+
+  test('formats ISO string input', () => {
+    expect(formatTimeHHMMSS('2026-09-05T16:00:00Z')).toBe('00:00:00')
+  })
+
+  test('formats Date input', () => {
+    expect(formatTimeHHMMSS(new Date('2026-09-05T06:23:05Z'))).toBe('14:23:05')
+  })
+
+  test('returns empty string for invalid input', () => {
+    expect(formatTimeHHMMSS('not-a-date')).toBe('')
+  })
+})
+
+describe('formatToolDuration', () => {
+  test('formats sub-second durations in ms', () => {
+    expect(formatToolDuration(843)).toBe('843ms')
+    expect(formatToolDuration(0)).toBe('0ms')
+  })
+
+  test('formats durations under a minute with one decimal', () => {
+    expect(formatToolDuration(2100)).toBe('2.1s')
+    expect(formatToolDuration(59_999)).toBe('60.0s')
+  })
+
+  test('formats durations of a minute or more as Xm Ys', () => {
+    expect(formatToolDuration(65_000)).toBe('1m 5s')
+    expect(formatToolDuration(600_000)).toBe('10m 0s')
+  })
+
+  test('returns empty string for invalid input', () => {
+    expect(formatToolDuration(-1)).toBe('')
+    expect(formatToolDuration(Number.NaN)).toBe('')
   })
 })

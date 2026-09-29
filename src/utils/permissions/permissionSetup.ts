@@ -796,7 +796,14 @@ export function initialPermissionModeFromCLI({
   }
 
   if (!result) {
-    result = { mode: 'default', notification }
+    // POWER_USER defaults to bypassPermissions when no explicit CLI flag or
+    // settings defaultMode applies — but the disable gates above still win.
+    result = feature('POWER_USER')
+      ? {
+          mode: disableBypassPermissionsMode ? 'default' : 'bypassPermissions',
+          notification,
+        }
+      : { mode: 'default', notification }
   }
 
   if (!result) {

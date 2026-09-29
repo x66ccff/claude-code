@@ -146,10 +146,12 @@ export async function showSetupScreens(
 
   const config = getGlobalConfig();
   let onboardingShown = false;
-  if (
-    !config.theme ||
-    !config.hasCompletedOnboarding // always show onboarding at least once
-  ) {
+  // POWER_USER skips the first-run theme picker: a missing theme alone must
+  // not trigger onboarding (ThemeProvider falls back to the dark theme).
+  const needsOnboarding = feature('POWER_USER')
+    ? !config.hasCompletedOnboarding
+    : !config.theme || !config.hasCompletedOnboarding; // always show onboarding at least once
+  if (needsOnboarding) {
     onboardingShown = true;
     const { Onboarding } = await import('./components/Onboarding.js');
     await showSetupDialog(
@@ -261,12 +263,15 @@ export async function showSetupScreens(
     }
   }
 
-  if (
-    (permissionMode === 'bypassPermissions' || allowDangerouslySkipPermissions) &&
-    !hasSkipDangerousModePermissionPrompt()
-  ) {
-    const { BypassPermissionsModeDialog } = await import('./components/BypassPermissionsModeDialog.js');
-    await showSetupDialog(root, done => <BypassPermissionsModeDialog onAccept={done} />);
+  // POWER_USER removes the bypass-permissions danger confirmation entirely.
+  if (!feature('POWER_USER')) {
+    if (
+      (permissionMode === 'bypassPermissions' || allowDangerouslySkipPermissions) &&
+      !hasSkipDangerousModePermissionPrompt()
+    ) {
+      const { BypassPermissionsModeDialog } = await import('./components/BypassPermissionsModeDialog.js');
+      await showSetupDialog(root, done => <BypassPermissionsModeDialog onAccept={done} />);
+    }
   }
 
   // --dangerously-load-development-channels confirmation. On accept, append

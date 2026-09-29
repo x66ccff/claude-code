@@ -245,7 +245,7 @@ export function getLogoDisplayData(): {
   billingType: string
   agentName: string | undefined
 } {
-  const version = process.env.DEMO_VERSION ?? MACRO.VERSION
+  const version = process.env.DEMO_VERSION ?? MACRO.BUILD_VERSION
   const serverUrl = getDirectConnectServerUrl()
   const displayPath = process.env.DEMO_VERSION
     ? '/code/claude'

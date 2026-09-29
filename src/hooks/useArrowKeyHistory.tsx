@@ -40,7 +40,9 @@ async function loadHistoryEntries(minCount: number, modeFilter?: HistoryMode): P
   pendingLoad = (async () => {
     const entries: HistoryEntry[] = [];
     let loaded = 0;
-    for await (const entry of getHistory()) {
+    // Up-arrow recall is strictly session-scoped: inputs from other sessions
+    // (even in the same project) must never surface here.
+    for await (const entry of getHistory({ sessionOnly: true })) {
       // If mode filter is specified, only include entries that match the mode
       if (modeFilter) {
         const entryMode = getModeFromInput(entry.display);

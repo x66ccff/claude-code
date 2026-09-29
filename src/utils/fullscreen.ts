@@ -104,11 +104,7 @@ export function _resetTmuxControlModeProbeForTesting(): void {
   loggedTmuxCcDisable = false
 }
 
-/**
- * Runtime env-var check only. Ants default to on (CLAUDE_CODE_NO_FLICKER=0
- * to opt out); external users default to off (CLAUDE_CODE_NO_FLICKER=1 to
- * opt in).
- */
+// Interactive mouse actions require the fixed viewport; explicit opt-out still wins.
 export function isFullscreenEnvEnabled(): boolean {
   // Explicit user opt-out always wins.
   if (isEnvDefinedFalsy(process.env.CLAUDE_CODE_NO_FLICKER)) return false
@@ -125,7 +121,7 @@ export function isFullscreenEnvEnabled(): boolean {
     }
     return false
   }
-  return process.env.USER_TYPE === 'ant'
+  return true
 }
 
 /**

@@ -20,6 +20,7 @@ import {
   logEvent,
 } from 'src/services/analytics/index.js'
 import { sanitizeToolNameForAnalytics } from 'src/services/analytics/metadata.js'
+import type { HookProgress } from 'src/types/hooks.js'
 import type { AgentId } from 'src/types/ids.js'
 import { companionIntroText } from '../buddy/prompt.js'
 import { NO_CONTENT_MESSAGE } from '../constants/messages.js'
@@ -475,6 +476,7 @@ export function createUserMessage({
   sourceToolAssistantUUID,
   permissionMode,
   origin,
+  toolDurationMs,
 }: {
   content: string | ContentBlockParam[]
   isMeta?: true
@@ -482,6 +484,14 @@ export function createUserMessage({
   isVirtual?: true
   isCompactSummary?: true
   toolUseResult?: unknown // Matches tool's `Output` type
+  /**
+   * OUTPUT_STATS: wall-clock duration of the tool run that produced this
+   * tool_result message. Must be a TOP-LEVEL field set at creation time —
+   * the transcript write path spreads the message when it is recorded, and
+   * `toolUseResult` gets schema-stripped by the renderer, so neither a
+   * later mutation nor a nested location would survive end-to-end.
+   */
+  toolDurationMs?: number
   /** MCP protocol metadata to pass through to SDK consumers (never sent to model) */
   mcpMeta?: {
     _meta?: Record<string, unknown>
@@ -521,6 +531,7 @@ export function createUserMessage({
     sourceToolAssistantUUID,
     permissionMode,
     origin,
+    toolDurationMs,
   }
   return m
 }
@@ -780,6 +791,13 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
             error: message?.error,
             isApiErrorMessage: message.isApiErrorMessage,
             advisorModel: message.advisorModel,
+            // OUTPUT_STATS: preserve streamStats through normalization.
+            // This whitelist rebuild otherwise drops it, so the rendered
+            // gray stats line loses the tok/s segment (transcript keeps it
+            // because persistence uses the original object). Shares the
+            // same object reference, so in-place mutations from the
+            // message_delta handler propagate without re-normalization.
+            streamStats: aMsg.streamStats,
           } as NormalizedAssistantMessage
         })
       }
@@ -818,6 +836,10 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
             ...createUserMessage({
               content: [_],
               toolUseResult: uMsg.toolUseResult,
+              // OUTPUT_STATS: carry the tool duration through normalization
+              // (this rebuild path is whitelist-based, same trap as the
+              // assistant branch's streamStats).
+              toolDurationMs: uMsg.toolDurationMs as number | undefined,
               mcpMeta: uMsg.mcpMeta as {
                 _meta?: Record<string, unknown>
                 structuredContent?: Record<string, unknown>
@@ -1057,7 +1079,8 @@ function isHookAttachmentMessage(
 ): message is AttachmentMessage<HookAttachment> {
   return (
     message.type === 'attachment' &&
-    (message.attachment?.type === 'hook_blocking_error' ||
+    (message.attachment?.type === 'hook_execution' ||
+      message.attachment?.type === 'hook_blocking_error' ||
       message.attachment?.type === 'hook_cancelled' ||
       message.attachment?.type === 'hook_error_during_execution' ||
       message.attachment?.type === 'hook_non_blocking_error' ||
@@ -1194,6 +1217,7 @@ export type MessageLookups = {
   progressMessagesByToolUseID: Map<string, ProgressMessage[]>
   inProgressHookCounts: Map<string, Map<HookEvent, number>>
   resolvedHookCounts: Map<string, Map<HookEvent, number>>
+  resolvedHookKeys: Map<string, Map<HookEvent, Set<string>>>
   /** Maps tool_use_id to the user message containing its tool_result */
   toolResultByToolUseID: Map<string, NormalizedMessage>
   /** Maps tool_use_id to the ToolUseBlockParam */
@@ -1276,8 +1300,11 @@ export function buildMessageLookups(
       }
 
       // Count in-progress hooks
-      const progressData = msg.data as { type: string; hookEvent: HookEvent }
-      if (progressData.type === 'hook_progress') {
+      const progressData = msg.data as
+        | { type: string; hookEvent: HookEvent }
+        | null
+        | undefined
+      if (progressData && progressData.type === 'hook_progress') {
         const hookEvent = progressData.hookEvent
         let byHookEvent = inProgressHookCounts.get(toolUseID)
         if (!byHookEvent) {
@@ -1327,12 +1354,26 @@ export function buildMessageLookups(
       }
     }
 
-    // Count resolved hooks (deduplicate by hookName)
+    // Count resolved hooks by run ID. Legacy lifecycle attachments fall back to
+    // hookName for resumed transcripts created before run IDs were recorded.
     if (isHookAttachmentMessage(msg)) {
-      const toolUseID = msg.attachment.toolUseID
-      const hookEvent = msg.attachment.hookEvent
-      const hookName = (msg.attachment as HookAttachmentWithName).hookName
-      if (hookName !== undefined) {
+      const attachment = msg.attachment
+      const isTerminalAttachment =
+        attachment.type === 'hook_execution' ||
+        attachment.type === 'hook_blocking_error' ||
+        attachment.type === 'hook_cancelled' ||
+        attachment.type === 'hook_error_during_execution' ||
+        attachment.type === 'hook_non_blocking_error' ||
+        attachment.type === 'hook_success'
+      const resolutionKey =
+        attachment.type === 'hook_execution'
+          ? attachment.hookId
+          : isTerminalAttachment
+            ? (attachment as HookAttachmentWithName).hookName
+            : undefined
+      if (resolutionKey !== undefined) {
+        const toolUseID = attachment.toolUseID
+        const hookEvent = attachment.hookEvent
         let byHookEvent = resolvedHookNames.get(toolUseID)
         if (!byHookEvent) {
           byHookEvent = new Map()
@@ -1343,7 +1384,7 @@ export function buildMessageLookups(
           names = new Set()
           byHookEvent.set(hookEvent, names)
         }
-        names.add(hookName)
+        names.add(resolutionKey)
       }
     }
   }
@@ -1390,6 +1431,7 @@ export function buildMessageLookups(
     progressMessagesByToolUseID,
     inProgressHookCounts,
     resolvedHookCounts,
+    resolvedHookKeys: resolvedHookNames,
     toolResultByToolUseID,
     toolUseByToolUseID,
     normalizedMessageCount: normalizedMessages.length,
@@ -1528,18 +1570,30 @@ export function updateMessageLookupsIncremental(
       }
     }
 
-    if (isHookAttachmentMessage(msg)) {
+    if (
+      isHookAttachmentMessage(msg) &&
+      msg.attachment.type === 'hook_execution'
+    ) {
       const toolUseID = msg.attachment.toolUseID
       const hookEvent = msg.attachment.hookEvent
-      const hookName = (msg.attachment as HookAttachmentWithName).hookName
-      if (hookName !== undefined) {
-        let byHookEvent = existing.resolvedHookCounts.get(toolUseID)
-        if (!byHookEvent) {
-          byHookEvent = new Map()
-          existing.resolvedHookCounts.set(toolUseID, byHookEvent)
-        }
-        byHookEvent.set(hookEvent, (byHookEvent.get(hookEvent) ?? 0) + 1)
+      let keysByHookEvent = existing.resolvedHookKeys.get(toolUseID)
+      if (!keysByHookEvent) {
+        keysByHookEvent = new Map()
+        existing.resolvedHookKeys.set(toolUseID, keysByHookEvent)
       }
+      let keys = keysByHookEvent.get(hookEvent)
+      if (!keys) {
+        keys = new Set()
+        keysByHookEvent.set(hookEvent, keys)
+      }
+      keys.add(msg.attachment.hookId)
+
+      let countsByHookEvent = existing.resolvedHookCounts.get(toolUseID)
+      if (!countsByHookEvent) {
+        countsByHookEvent = new Map()
+        existing.resolvedHookCounts.set(toolUseID, countsByHookEvent)
+      }
+      countsByHookEvent.set(hookEvent, keys.size)
     }
   }
 
@@ -1634,6 +1688,7 @@ export const EMPTY_LOOKUPS: MessageLookups = {
   progressMessagesByToolUseID: new Map(),
   inProgressHookCounts: new Map(),
   resolvedHookCounts: new Map(),
+  resolvedHookKeys: new Map(),
   toolResultByToolUseID: new Map(),
   toolUseByToolUseID: new Map(),
   normalizedMessageCount: 0,
@@ -1744,11 +1799,19 @@ export function hasUnresolvedHooksFromLookup(
   hookEvent: HookEvent,
   lookups: MessageLookups,
 ): boolean {
-  const inProgressCount =
-    lookups.inProgressHookCounts.get(toolUseID)?.get(hookEvent) ?? 0
-  const resolvedCount =
-    lookups.resolvedHookCounts.get(toolUseID)?.get(hookEvent) ?? 0
-  return inProgressCount > resolvedCount
+  const resolvedHookKeys = lookups.resolvedHookKeys
+    .get(toolUseID)
+    ?.get(hookEvent)
+  return (lookups.progressMessagesByToolUseID.get(toolUseID) ?? []).some(
+    message => {
+      const data = message.data as HookProgress
+      return (
+        data.type === 'hook_progress' &&
+        data.hookEvent === hookEvent &&
+        !resolvedHookKeys?.has(data.hookId)
+      )
+    },
+  )
 }
 
 export function getToolUseIDs(
@@ -3347,6 +3410,11 @@ export function handleMessageFromStream(
 
   if (message.type === 'stream_request_start') {
     onSetStreamMode('requesting')
+    // New request starting — clear any stale streaming thinking so the
+    // marquee starts fresh for this request.
+    if (feature('THINKING_MARQUEE')) {
+      onStreamingThinking?.(() => null)
+    }
     return
   }
 
@@ -3460,9 +3528,21 @@ export function handleMessageFromStream(
           })
           return
         }
-        case 'thinking_delta':
-          onUpdateLength(streamMsg.event.delta.thinking)
+        case 'thinking_delta': {
+          const thinkingDelta = streamMsg.event.delta.thinking
+          onUpdateLength(thinkingDelta)
+          // Feed streamed thinking text to the UI so the spinner marquee can
+          // show what the model is thinking in real time (transparency +
+          // stall visibility). Without this, deltas are dropped and only the
+          // completed block is surfaced after the fact.
+          if (feature('THINKING_MARQUEE')) {
+            onStreamingThinking?.(cur => ({
+              thinking: (cur?.thinking ?? '') + thinkingDelta,
+              isStreaming: true,
+            }))
+          }
           return
+        }
         case 'signature_delta':
           // Signatures are cryptographic authentication strings, not model
           // output. Excluding them from onUpdateLength prevents them from
@@ -3472,6 +3552,16 @@ export function handleMessageFromStream(
           return
       }
     case 'content_block_stop':
+      // A content block finished. If thinking was streaming, mark it ended so
+      // the marquee stops animating (the full block re-arrives with the
+      // completed assistant message and refreshes the display).
+      if (feature('THINKING_MARQUEE')) {
+        onStreamingThinking?.(cur =>
+          cur && cur.isStreaming
+            ? { ...cur, isStreaming: false, streamingEndedAt: Date.now() }
+            : cur,
+        )
+      }
       return
     case 'message_delta':
       onSetStreamMode('responding')
@@ -4691,6 +4781,7 @@ You have exited auto mode. The user may now want to interact more directly. You 
     case 'edited_image_file':
     case 'hook_cancelled':
     case 'hook_error_during_execution':
+    case 'hook_execution':
     case 'hook_non_blocking_error':
     case 'hook_system_message':
     case 'structured_output':

@@ -1,13 +1,16 @@
+import { feature } from 'bun:bundle';
 import type { ToolResultBlockParam } from '@anthropic-ai/sdk/resources/index.mjs';
 import * as React from 'react';
 import type { Tools } from '../../../Tool.js';
 import type { NormalizedUserMessage, ProgressMessage } from '../../../types/message.js';
+import { formatToolDuration } from '../../../utils/format.js';
 import {
   type buildMessageLookups,
   CANCEL_MESSAGE,
   INTERRUPT_MESSAGE_FOR_TOOL_USE,
   REJECT_MESSAGE,
 } from '../../../utils/messages.js';
+import { ToolDurationProvider } from '../../MessageResponse.js';
 import { UserToolCanceledMessage } from './UserToolCanceledMessage.js';
 import { UserToolErrorMessage } from './UserToolErrorMessage.js';
 import { UserToolRejectMessage } from './UserToolRejectMessage.js';
@@ -44,6 +47,16 @@ export function UserToolResultMessage({
     return null;
   }
 
+  // OUTPUT_STATS: gray `(2.1s)` suffix on the ⎿ result row, sourced from the
+  // top-level toolDurationMs field stamped at message creation in
+  // toolExecution.ts (absent on older transcripts). Covers both success and
+  // error/interrupt branches below.
+  const durationText = feature('OUTPUT_STATS')
+    ? typeof message.toolDurationMs === 'number' && message.toolDurationMs >= 0
+      ? formatToolDuration(message.toolDurationMs)
+      : undefined
+    : undefined;
+
   if (typeof param.content === 'string' && param.content.startsWith(CANCEL_MESSAGE)) {
     return <UserToolCanceledMessage />;
   }
@@ -68,30 +81,34 @@ export function UserToolResultMessage({
 
   if (param.is_error) {
     return (
-      <UserToolErrorMessage
-        progressMessagesForMessage={progressMessagesForMessage}
-        tool={toolUse.tool}
-        tools={tools}
-        param={param}
-        verbose={verbose}
-        isTranscriptMode={isTranscriptMode}
-      />
+      <ToolDurationProvider durationText={durationText}>
+        <UserToolErrorMessage
+          progressMessagesForMessage={progressMessagesForMessage}
+          tool={toolUse.tool}
+          tools={tools}
+          param={param}
+          verbose={verbose}
+          isTranscriptMode={isTranscriptMode}
+        />
+      </ToolDurationProvider>
     );
   }
 
   return (
-    <UserToolSuccessMessage
-      message={message}
-      lookups={lookups}
-      toolUseID={toolUse.toolUse.id}
-      progressMessagesForMessage={progressMessagesForMessage}
-      style={style}
-      tool={toolUse.tool}
-      tools={tools}
-      verbose={verbose}
-      width={width}
-      isTranscriptMode={isTranscriptMode}
-      shouldCollapseDiffs={shouldCollapseDiffs}
-    />
+    <ToolDurationProvider durationText={durationText}>
+      <UserToolSuccessMessage
+        message={message}
+        lookups={lookups}
+        toolUseID={toolUse.toolUse.id}
+        progressMessagesForMessage={progressMessagesForMessage}
+        style={style}
+        tool={toolUse.tool}
+        tools={tools}
+        verbose={verbose}
+        width={width}
+        isTranscriptMode={isTranscriptMode}
+        shouldCollapseDiffs={shouldCollapseDiffs}
+      />
+    </ToolDurationProvider>
   );
 }

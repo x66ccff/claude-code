@@ -1,7 +1,11 @@
+import { feature } from 'bun:bundle';
 import chalk from 'chalk';
 import * as React from 'react';
 import type { CommandResultDisplay } from '../../commands.js';
+import { ConfigurableShortcutHint } from '../../components/ConfigurableShortcutHint.js';
+import { ConsoleOAuthFlow } from '../../components/ConsoleOAuthFlow.js';
 import { ModelPicker } from '../../components/ModelPicker.js';
+import { Dialog, Text } from '@anthropic/ink';
 import { COMMON_HELP_ARGS, COMMON_INFO_ARGS } from '../../constants/xml.js';
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -252,6 +256,54 @@ function ShowModelAndClose({ onDone }: { onDone: (result?: string) => void }): R
   return null;
 }
 
+/**
+ * POWER_USER: unified API configuration form (Base URL / API key / model
+ * names) — the same "Anthropic Compatible" screen /login opens. Replaces the
+ * ModelPicker for bare `/model` because this fork runs against an
+ * Anthropic-protocol proxy, where the endpoint, key and model names are the
+ * configuration that actually matters. On save, ConsoleOAuthFlow persists
+ * settings + env and calls setMainLoopModelOverride; we additionally sync
+ * appState.mainLoopModel so the current session picks it up immediately.
+ */
+function UnifiedConfigWrapper({
+  onDone,
+}: {
+  onDone: (result?: string, options?: { display?: CommandResultDisplay }) => void;
+}): React.ReactNode {
+  const setAppState = useSetAppState();
+  return (
+    <Dialog
+      title="Model & API Configuration"
+      color="permission"
+      onCancel={() => onDone('Kept current configuration', { display: 'system' })}
+      inputGuide={exitState =>
+        exitState.pending ? (
+          <Text>Press {exitState.keyName} again to exit</Text>
+        ) : (
+          <ConfigurableShortcutHint action="confirm:no" context="Confirmation" fallback="Esc" description="cancel" />
+        )
+      }
+    >
+      <ConsoleOAuthFlow
+        initialMethod="custom_platform"
+        onDone={() => {
+          const model = process.env.ANTHROPIC_MODEL;
+          if (model) {
+            setAppState(prev => ({
+              ...prev,
+              mainLoopModel: model,
+              mainLoopModelForSession: null,
+            }));
+            onDone(`Saved API configuration · model set to ${chalk.bold(model)}`);
+          } else {
+            onDone('Saved API configuration');
+          }
+        }}
+      />
+    </Dialog>
+  );
+}
+
 export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
   args = args?.trim() || '';
   if (COMMON_INFO_ARGS.includes(args)) {
@@ -272,6 +324,13 @@ export const call: LocalJSXCommandCall = async (onDone, _context, args) => {
       args: args as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     });
     return <SetModelAndClose args={args} onDone={onDone} />;
+  }
+
+  // POWER_USER: bare /model opens the unified API configuration form
+  // (Base URL / API key / model names) instead of the ModelPicker —
+  // this fork targets Anthropic-protocol proxies, not official models.
+  if (feature('POWER_USER')) {
+    return <UnifiedConfigWrapper onDone={onDone} />;
   }
 
   return <ModelPickerWrapper onDone={onDone} />;

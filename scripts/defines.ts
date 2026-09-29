@@ -16,8 +16,10 @@ const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
  * VERSION is read from package.json to avoid version drift.
  */
 export function getMacroDefines(): Record<string, string> {
+  const buildVersion = process.env.CLAUDE_CODE_BUILD_VERSION ?? pkg.version
   return {
     'MACRO.VERSION': JSON.stringify(pkg.version),
+    'MACRO.BUILD_VERSION': JSON.stringify(buildVersion),
     'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
     'MACRO.FEEDBACK_CHANNEL': JSON.stringify(''),
     'MACRO.ISSUES_EXPLAINER': JSON.stringify(''),
@@ -98,4 +100,24 @@ export const DEFAULT_BUILD_FEATURES = [
   // Persistent thread goal command — auto-continuation, JSONL persistence,
   // strict completion/blocked audit. See src/services/goal.
   'GOAL',
+  // Spinner 走马灯：实时滚动显示 streaming thinking / compacting 摘要内容，
+  // 让思考过程对用户透明、可感知是否卡死（UI 层）。
+  'THINKING_MARQUEE',
+  // 卡死重试：thinking 阶段超过 5 分钟未结束自动中断并重试（最多 10 次、
+  // 间隔 5 秒）；compact 请求超过 10 分钟未结束同样中断重试。
+  'STALL_RETRY',
+  // 上下文用量条：PromptInput 上方常驻显示上下文窗口占用百分比 +
+  // cache 命中率（ContextUsageBar 组件）。
+  'CONTEXT_USAGE_BAR',
+  // 输出统计透明化：spinner 实时 tok/s、每条 assistant 消息后的灰色
+  // token/速度统计行、每轮结束的 output/thinking token 汇总。
+  'OUTPUT_STATS',
+  // 老手模式：跳过首次主题选择框与 bypass 危险确认（含 root 交互式
+  // 确认），默认权限模式改为 bypassPermissions，退出 Plan 模式恢复
+  // 进入前的权限模式而不是掉回 default。
+  'POWER_USER',
+  // /resume 会话选择器：dsw/dlc（阿里云 PAI）Linux 机器上把 hostname 写入
+  // 会话 JSONL 每行（写侧门控），选择器展示 + 搜索原始机器名（读侧按字段
+  // 存在性展示，无需 flag）。
+  'RESUME_HOSTNAME',
 ] as const

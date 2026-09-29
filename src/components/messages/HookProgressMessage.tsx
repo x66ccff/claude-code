@@ -1,5 +1,6 @@
 import * as React from 'react';
 import type { HookEvent } from 'src/entrypoints/agentSdkTypes.js';
+import type { HookProgress } from 'src/types/hooks.js';
 import type { buildMessageLookups } from 'src/utils/messages.js';
 import { Box, Text } from '@anthropic/ink';
 import { MessageResponse } from '../MessageResponse.js';
@@ -12,47 +13,39 @@ type Props = {
   isTranscriptMode?: boolean;
 };
 
-export function HookProgressMessage({ hookEvent, lookups, toolUseID, isTranscriptMode }: Props): React.ReactNode {
-  const inProgressHookCount = lookups.inProgressHookCounts.get(toolUseID)?.get(hookEvent) ?? 0;
-  const resolvedHookCount = lookups.resolvedHookCounts.get(toolUseID)?.get(hookEvent) ?? 0;
-  if (inProgressHookCount === 0) {
-    return null;
-  }
+export function HookProgressMessage({
+  hookEvent,
+  lookups,
+  toolUseID,
+  verbose,
+  isTranscriptMode,
+}: Props): React.ReactNode {
+  const resolvedHookKeys = lookups.resolvedHookKeys.get(toolUseID)?.get(hookEvent);
+  const progressMessages = (lookups.progressMessagesByToolUseID.get(toolUseID) ?? []).filter(message => {
+    const data = message.data as HookProgress;
+    return data.type === 'hook_progress' && data.hookEvent === hookEvent && !resolvedHookKeys?.has(data.hookId);
+  });
 
-  if (hookEvent === 'PreToolUse' || hookEvent === 'PostToolUse') {
-    // In transcript mode, show a static summary since messages never re-render
-    // (so a transient "Running..." would get stuck).
-    if (isTranscriptMode) {
-      return (
-        <MessageResponse>
-          <Box flexDirection="row">
-            <Text dimColor>{inProgressHookCount} </Text>
-            <Text dimColor bold>
-              {hookEvent}
-            </Text>
-            <Text dimColor>{inProgressHookCount === 1 ? ' hook' : ' hooks'} ran</Text>
-          </Box>
-        </MessageResponse>
-      );
-    }
-    // Outside transcript mode, hide — completion info is shown via
-    // async_hook_response attachments instead.
-    return null;
-  }
-
-  if (resolvedHookCount === inProgressHookCount) {
+  if (progressMessages.length === 0) {
     return null;
   }
 
   return (
-    <MessageResponse>
-      <Box flexDirection="row">
-        <Text dimColor>Running </Text>
-        <Text dimColor bold>
-          {hookEvent}
-        </Text>
-        <Text dimColor>{inProgressHookCount === 1 ? ' hook…' : ' hooks…'}</Text>
-      </Box>
-    </MessageResponse>
+    <Box flexDirection="column">
+      {progressMessages.map(message => {
+        const data = message.data as HookProgress;
+        return (
+          <MessageResponse key={data.hookId}>
+            <Box flexDirection="column">
+              <Text dimColor>
+                Hook {data.hookEvent} · {data.hookSource} · {data.hookType} ·{' '}
+                {isTranscriptMode ? 'started' : 'running…'}
+              </Text>
+              {verbose ? <Text dimColor>input: {data.command}</Text> : null}
+            </Box>
+          </MessageResponse>
+        );
+      })}
+    </Box>
   );
 }

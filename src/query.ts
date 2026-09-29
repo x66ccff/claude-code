@@ -64,6 +64,9 @@ import {
   getAttachmentMessages,
   startRelevantMemoryPrefetch,
 } from './utils/attachments.js'
+// [workflow-turn-limit patch]
+import { workflowAgentTurnWarnStart } from './workflow/turnLimits.js'
+// [end workflow-turn-limit patch]
 /* eslint-disable @typescript-eslint/no-require-imports */
 const skillPrefetch = feature('EXPERIMENTAL_SKILL_SEARCH')
   ? (require('./services/skillSearch/prefetch.js') as typeof import('./services/skillSearch/prefetch.js'))
@@ -2006,6 +2009,33 @@ async function* queryLoop(
 
     // Each time we have tool results and are about to recurse, that's a turn
     const nextTurnCount = turnCount + 1
+
+    // [workflow-turn-limit patch] Per-turn remaining-rounds reminder for workflow
+    // sub-agents inside the warning window (default turns 30..60, env-tunable via
+    // CCB_WORKFLOW_AGENT_TURN_WARN_START / CCB_WORKFLOW_AGENT_MAX_TURNS). Gated on
+    // querySource === 'workflow' so REPL/SDK/compact/regular subagent queries are
+    // unaffected. The attachment is yielded (transcript/UI) AND pushed into
+    // toolResults so it becomes part of the next turn's messages.
+    if (
+      maxTurns &&
+      querySource === 'workflow' &&
+      nextTurnCount >= Math.min(workflowAgentTurnWarnStart(), maxTurns) &&
+      nextTurnCount <= maxTurns
+    ) {
+      const remainingTurns = maxTurns - nextTurnCount + 1
+      const turnWarningMessage = createAttachmentMessage({
+        type: 'hook_additional_context',
+        content: [
+          `[workflow-turn-limit] 你的工具调用轮次上限为 ${maxTurns}，即将进入第 ${nextTurnCount} 轮，剩余约 ${remainingTurns} 轮。请尽快收敛当前工作、停止开启新任务，并给出最终结果；达到上限后你将被立即结束。`,
+        ],
+        hookName: 'WorkflowTurnLimit',
+        toolUseID: `hook-${deps.uuid()}`,
+        hookEvent: 'PostToolUse',
+      })
+      yield turnWarningMessage
+      toolResults.push(turnWarningMessage)
+    }
+    // [end workflow-turn-limit patch]
 
     // Periodic task summary for `claude ps` — fires mid-turn so a
     // long-running agent still refreshes what it's working on. Gated

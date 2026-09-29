@@ -460,13 +460,13 @@ export const SettingsSchema = lazySchema(() =>
         .boolean()
         .optional()
         .describe('Disable all hooks and statusLine execution'),
-      // Which shell backs input-box `!` (see docs/design/ps-shell-selection.md §4.2)
+      // Which shell backs input-box `!` (see resolveDefaultShell)
       defaultShell: z
         .enum(['bash', 'powershell'])
         .optional()
         .describe(
           'Default shell for input-box ! commands. ' +
-            "Defaults to 'bash' on all platforms (no Windows auto-flip).",
+            "Defaults to 'powershell' on Windows when the PowerShell tool is enabled, otherwise 'bash'. Set explicitly to override.",
         ),
       // Only run hooks defined in managed settings (managed-settings.json)
       allowManagedHooksOnly: z
@@ -665,23 +665,33 @@ export const SettingsSchema = lazySchema(() =>
         .enum(['api', 'bing', 'brave', 'exa', 'serper', 'tavily'])
         .optional()
         .describe(
-          'Web search backend adapter. "serper" uses the Serper Google Search API (default), ' +
-            '"api" uses Anthropic server-side search, "bing" scrapes Bing HTML, ' +
-            '"brave" uses Brave Search API, "exa" uses Exa AI, and "tavily" uses Tavily Search API.',
+          'Web search backend adapter. "tavily" uses the Tavily Search API ' +
+            '(requires tavilyApiKey/TAVILY_API_KEY or tavilyEndpointUrl; default when configured), ' +
+            '"api" uses Anthropic server-side search, "bing" scrapes Bing HTML (key-free fallback default), ' +
+            '"brave" uses Brave Search API, "exa" uses Exa AI, and "serper" uses Serper Google Search API.',
         ),
       webFetchAdapter: z
         .enum(['tavily', 'http'])
         .optional()
         .describe(
-          'Web fetch backend. "http" fetches the URL through the dedicated WebFetch proxy (default), ' +
-            'while "tavily" uses Tavily Extract API and returns Markdown directly.',
+          'Web fetch backend. "tavily" uses the Tavily Extract API which returns Markdown directly ' +
+            '(requires tavilyApiKey/TAVILY_API_KEY or tavilyEndpointUrl; default when configured), ' +
+            '"http" fetches the URL via HTTP with the optional dedicated proxy (key-free fallback default).',
         ),
       tavilyEndpointUrl: z
         .string()
         .optional()
         .describe(
-          'Custom Tavily API endpoint URL. Defaults to https://tavily.claude-code-best.win. ' +
-            'Used by both WebSearch and WebFetch when tavily adapter is selected.',
+          'Custom Tavily-compatible API endpoint URL. When unset, the official ' +
+            'https://api.tavily.com is used and requires an API key. ' +
+            'Used by both WebSearch and WebFetch when the tavily adapter is selected.',
+        ),
+      tavilyApiKey: z
+        .string()
+        .optional()
+        .describe(
+          'Tavily API key for the official Tavily API (https://api.tavily.com). ' +
+            'Can also be provided via the TAVILY_API_KEY environment variable.',
         ),
       braveApiKey: z
         .string()
@@ -1135,7 +1145,7 @@ export const SettingsSchema = lazySchema(() =>
         .max(100)
         .optional()
         .describe(
-          'Prompt cache hit rate threshold (0-100). Warnings shown when cache hit rate falls below this percentage. Default: 80.',
+          'Prompt cache hit rate threshold (0-100). Warnings shown when cache hit rate falls below this percentage. Default: 70.',
         ),
       cacheWarningEnabled: z
         .boolean()

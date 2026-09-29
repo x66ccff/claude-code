@@ -1,131 +1,137 @@
-import chalk from 'chalk'
-import { ctrlOToExpand } from '../components/CtrlOToExpand.js'
+import {
+  type AnsiCode,
+  ansiCodesToString,
+  reduceAnsiCodesIncremental,
+  tokenize,
+  undoAnsiCodes,
+} from '@alcalzone/ansi-tokenize'
 import { stringWidth } from '@anthropic/ink'
-import sliceAnsi from './sliceAnsi.js'
 
-// Text rendering utilities for terminal display
-const MAX_LINES_TO_SHOW = 3
-// Account for MessageResponse prefix ("  ⎿ " = 5 chars) + parent width
-// reduction (columns - 5 in tool result rendering)
+const PREVIEW_LINES_PER_SIDE = 3
+const MAX_UNFOLDED_LINES = PREVIEW_LINES_PER_SIDE * 2 + 1
+// MessageResponse prefix and the parent tool-result width reduction.
 const PADDING_TO_PREVENT_OVERFLOW = 10
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
-/**
- * Inserts newlines in a string to wrap it at the specified width.
- * Uses ANSI-aware slicing to avoid splitting escape sequences.
- * @param text The text to wrap.
- * @param wrapWidth The width at which to wrap lines (in visible characters).
- * @returns The wrapped text.
- */
-function wrapText(
-  text: string,
-  wrapWidth: number,
-): { aboveTheFold: string; remainingLines: number } {
-  const lines = text.split('\n')
-  const wrappedLines: string[] = []
-
-  for (const line of lines) {
-    const visibleWidth = stringWidth(line)
-    if (visibleWidth <= wrapWidth) {
-      wrappedLines.push(line.trimEnd())
-    } else {
-      // Break long lines into chunks of wrapWidth visible characters
-      // using ANSI-aware slicing to preserve escape sequences
-      let position = 0
-      while (position < visibleWidth) {
-        const chunk = sliceAnsi(line, position, position + wrapWidth)
-        wrappedLines.push(chunk.trimEnd())
-        position += wrapWidth
-      }
-    }
-  }
-
-  const remainingLines = wrappedLines.length - MAX_LINES_TO_SHOW
-
-  // If there's only 1 line after the fold, show it directly
-  // instead of showing "... +1 line (ctrl+o to expand)"
-  if (remainingLines === 1) {
-    return {
-      aboveTheFold: wrappedLines
-        .slice(0, MAX_LINES_TO_SHOW + 1)
-        .join('\n')
-        .trimEnd(),
-      remainingLines: 0, // All lines are shown, nothing remaining
-    }
-  }
-
-  // Otherwise show the standard MAX_LINES_TO_SHOW
-  return {
-    aboveTheFold: wrappedLines.slice(0, MAX_LINES_TO_SHOW).join('\n').trimEnd(),
-    remainingLines: Math.max(0, remainingLines),
-  }
+type OutputPreview = {
+  head: string[]
+  tail: string[]
+  hiddenLines: number
+  approximate: boolean
 }
 
-/**
- * Renders the content with line-based truncation for terminal display.
- * If the content exceeds the maximum number of lines, it truncates the content
- * and adds a message indicating the number of additional lines.
- * @param content The content to render.
- * @param terminalWidth Terminal width for wrapping lines.
- * @returns The rendered content with truncation if needed.
- */
-export function renderTruncatedContent(
+function updateAnsiCodes(active: AnsiCode[], codes: AnsiCode[]): AnsiCode[] {
+  return reduceAnsiCodesIncremental(active, codes).filter(
+    code => code.code !== code.endCode,
+  )
+}
+
+function wrapPreview(text: string, wrapWidth: number): string[] {
+  const lines: string[] = []
+  let active: AnsiCode[] = []
+  let line = ''
+  let width = 0
+  let hasText = false
+  let lastNonEmptyLine = 0
+
+  function finishLine() {
+    lines.push(line + ansiCodesToString(undoAnsiCodes(active)))
+    if (hasText) lastNonEmptyLine = lines.length
+    line = ansiCodesToString(active)
+    width = 0
+    hasText = false
+  }
+
+  for (const token of tokenize(text)) {
+    if (token.type === 'ansi') {
+      active = updateAnsiCodes(active, [token])
+      line += token.code
+    } else if (token.type === 'char') {
+      if (token.value === '\n' || token.value === '\r\n') {
+        finishLine()
+        continue
+      }
+      const charWidth = token.fullWidth ? 2 : stringWidth(token.value)
+      if (width > 0 && width + charWidth > wrapWidth) finishLine()
+      line += token.value
+      width += charWidth
+      hasText ||= token.value.trim().length > 0
+    }
+  }
+  finishLine()
+  return lines.slice(0, lastNonEmptyLine)
+}
+
+export function getOutputPreview(
   content: string,
   terminalWidth: number,
-  suppressExpandHint = false,
-): string {
-  const trimmedContent = content.trimEnd()
-  if (!trimmedContent) {
-    return ''
+): OutputPreview {
+  const text = content.trimEnd()
+  const wrapWidth = Math.max(terminalWidth - PADDING_TO_PREVENT_OVERFLOW, 10)
+  const maxChars = PREVIEW_LINES_PER_SIDE * wrapWidth * 32
+
+  if (text.length <= maxChars * 2) {
+    const lines = wrapPreview(text, wrapWidth)
+    if (lines.length <= MAX_UNFOLDED_LINES) {
+      return { head: lines, tail: [], hiddenLines: 0, approximate: false }
+    }
+    return {
+      head: lines.slice(0, PREVIEW_LINES_PER_SIDE),
+      tail: lines.slice(-PREVIEW_LINES_PER_SIDE),
+      hiddenLines: lines.length - PREVIEW_LINES_PER_SIDE * 2,
+      approximate: false,
+    }
   }
 
-  const wrapWidth = Math.max(terminalWidth - PADDING_TO_PREVENT_OVERFLOW, 10)
-
-  // Only process enough content for the visible lines. Avoids O(n) wrapping
-  // on huge outputs (e.g. 64MB binary dumps that cause 382K-row screens).
-  const maxChars = MAX_LINES_TO_SHOW * wrapWidth * 4
-  const preTruncated = trimmedContent.length > maxChars
-  const contentForWrapping = preTruncated
-    ? trimmedContent.slice(0, maxChars)
-    : trimmedContent
-
-  const { aboveTheFold, remainingLines } = wrapText(
-    contentForWrapping,
-    wrapWidth,
-  )
-
-  const estimatedRemaining = preTruncated
-    ? Math.max(
-        remainingLines,
-        Math.ceil(trimmedContent.length / wrapWidth) - MAX_LINES_TO_SHOW,
+  const segments = graphemes.segment(text)
+  let headEnd = segments.containing(maxChars)!.index
+  let tailStart = segments.containing(text.length - maxChars)!.index
+  let tailCodes: AnsiCode[] = []
+  // Scan only control sequences in the omitted middle; never tokenize or wrap the full output.
+  const escapes =
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI and OSC boundaries require matching control characters.
+    /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b\u009c]*(?:\u0007|\u009c|\u001b\\))/g
+  for (const match of text.matchAll(escapes)) {
+    if (match.index >= tailStart) break
+    const end = match.index + match[0].length
+    if (match.index < headEnd && end > headEnd) headEnd = match.index
+    if (end > tailStart) tailStart = end
+    if (match[0].length <= maxChars) {
+      tailCodes = updateAnsiCodes(
+        tailCodes,
+        tokenize(match[0]).filter(
+          (token): token is AnsiCode => token.type === 'ansi',
+        ),
       )
-    : remainingLines
+    }
+  }
 
-  return [
-    aboveTheFold,
-    estimatedRemaining > 0
-      ? chalk.dim(
-          `… +${estimatedRemaining} lines${suppressExpandHint ? '' : ` ${ctrlOToExpand()}`}`,
-        )
-      : '',
-  ]
-    .filter(Boolean)
-    .join('\n')
+  const head = wrapPreview(text.slice(0, headEnd), wrapWidth).slice(
+    0,
+    PREVIEW_LINES_PER_SIDE,
+  )
+  const tail = wrapPreview(
+    ansiCodesToString(tailCodes) + text.slice(tailStart),
+    wrapWidth,
+  ).slice(-PREVIEW_LINES_PER_SIDE)
+  return {
+    head,
+    tail,
+    hiddenLines: Math.max(
+      2,
+      Math.ceil(text.length / wrapWidth) - head.length - tail.length,
+    ),
+    approximate: true,
+  }
 }
 
-/** Fast check: would OutputLine truncate this content? Counts raw newlines
- *  only (ignores terminal-width wrapping), so it may return false for a single
- *  very long line that wraps past 3 visual rows — acceptable, since the common
- *  case is multi-line output. */
+// Raw-newline approximation; long single lines may still fold at the terminal width.
 export function isOutputLineTruncated(content: string): boolean {
   let pos = 0
-  // Need more than MAX_LINES_TO_SHOW newlines (content fills > 3 lines).
-  // The +1 accounts for wrapText showing an extra line when remainingLines==1.
-  for (let i = 0; i <= MAX_LINES_TO_SHOW; i++) {
+  for (let i = 0; i < MAX_UNFOLDED_LINES; i++) {
     pos = content.indexOf('\n', pos)
     if (pos === -1) return false
     pos++
   }
-  // A trailing newline is a terminator, not a new line — match
-  // renderTruncatedContent's trimEnd() behavior.
-  return pos < content.length
+  return content.slice(pos).trimEnd().length > 0
 }

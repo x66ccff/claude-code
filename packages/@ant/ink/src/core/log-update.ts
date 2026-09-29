@@ -5,6 +5,7 @@ import {
 } from '@alcalzone/ansi-tokenize'
 /** Debug logger — no-op placeholder until proper logger injection is added */
 const logForDebugging = (_message: string) => {}
+import { canEraseScrollback } from './clearTerminal.js'
 import type { Diff, FlickerReason, Frame } from './frame.js'
 import type { Point } from './layout/geometry.js'
 import {
@@ -28,6 +29,11 @@ import {
   setScrollRegion,
 } from './termio/csi.js'
 import { LINK_END, link as oscLink } from './termio/osc.js'
+import {
+  isLegacyWindowsConsole,
+  legacyConsoleMode,
+  legacyConsoleResetMs,
+} from './legacyConsole.js'
 
 type State = {
   previousOutput: string
@@ -43,6 +49,8 @@ const NEWLINE = { type: 'stdout', content: '\n' } as const
 
 export class LogUpdate {
   private state: State
+  // Timestamp of the last legacy-console full reset (see render()).
+  private lastLegacyReset = 0
 
   constructor(private readonly options: Options) {
     this.state = {
@@ -144,7 +152,36 @@ export class LogUpdate {
       next.viewport.height < prev.viewport.height ||
       (prev.viewport.width !== 0 && next.viewport.width !== prev.viewport.width)
     ) {
-      return fullResetSequence_CAUSES_FLICKER(next, 'resize', stylePool)
+      return fullResetSequence_CAUSES_FLICKER(
+        next,
+        'resize',
+        stylePool,
+        undefined,
+        altScreen,
+      )
+    }
+
+    // Legacy Windows console (pre-ConPTY, build < 17763): the old conhost
+    // VT parser drifts on incremental cursor diffs (pending-wrap semantics
+    // at the last column), so residue accumulates until a full repaint.
+    // Replace the diff with a full reset — every frame in 'always' mode
+    // (machines where each diff corrupts immediately), otherwise on a
+    // configurable interval so the screen self-heals. Gated off everywhere
+    // else; see legacyConsole.ts.
+    if (isLegacyWindowsConsole()) {
+      if (
+        legacyConsoleMode() === 'always' ||
+        startTime - this.lastLegacyReset >= legacyConsoleResetMs()
+      ) {
+        this.lastLegacyReset = startTime
+        return fullResetSequence_CAUSES_FLICKER(
+          next,
+          'clear',
+          stylePool,
+          undefined,
+          altScreen,
+        )
+      }
     }
 
     // DECSTBM scroll optimization: when a ScrollBox's scrollTop changed,
@@ -216,10 +253,22 @@ export class LogUpdate {
       logForDebugging(
         `Full reset (shrink->below): prevHeight=${prev.screen.height}, nextHeight=${next.screen.height}, viewport=${prev.viewport.height}`,
       )
-      return fullResetSequence_CAUSES_FLICKER(next, 'offscreen', stylePool)
+      return fullResetSequence_CAUSES_FLICKER(
+        next,
+        'offscreen',
+        stylePool,
+        undefined,
+        altScreen,
+      )
     }
 
+    // [ccb mod] In alt-screen, skip this early full-reset exit: the diff loop
+    // below drops per-cell changes to unreachable (scrolled-off) rows instead
+    // of resetting, which avoids both the 3J-repush duplication and the
+    // clearViewport flicker. Off-screen rows stay stale in scrollback — they
+    // are invisible, and scrollback content in alt-screen is best-effort.
     if (
+      !altScreen &&
       prev.screen.height >= prev.viewport.height &&
       prev.screen.height > 0 &&
       cursorAtBottom &&
@@ -240,11 +289,17 @@ export class LogUpdate {
       if (scrollbackChangeY >= 0) {
         const prevLine = readLine(prev.screen, scrollbackChangeY)
         const nextLine = readLine(next.screen, scrollbackChangeY)
-        return fullResetSequence_CAUSES_FLICKER(next, 'offscreen', stylePool, {
-          triggerY: scrollbackChangeY,
-          prevLine,
-          nextLine,
-        })
+        return fullResetSequence_CAUSES_FLICKER(
+          next,
+          'offscreen',
+          stylePool,
+          {
+            triggerY: scrollbackChangeY,
+            prevLine,
+            nextLine,
+          },
+          altScreen,
+        )
       }
     }
 
@@ -268,6 +323,8 @@ export class LogUpdate {
           next,
           'offscreen',
           this.options.stylePool,
+          undefined,
+          altScreen,
         )
       }
 
@@ -344,6 +401,16 @@ export class LogUpdate {
       // If the cell outside the viewport range has changed, we need to reset
       // because we can't move the cursor there to draw.
       if (y < viewportY) {
+        if (altScreen) {
+          // [ccb mod] Alt-screen: the row lives in scrollback (or scrolled off
+          // entirely). Cursor-up can't reach it — but a full reset here means
+          // re-pushing the whole frame, which duplicates scrollback on any
+          // terminal whose 3J doesn't clear alt-screen scrollback (iTerm2).
+          // Drop the change: the row stays stale in scrollback, which is
+          // invisible and harmless; the model (next.screen) still records it,
+          // so no further diff fires for this row.
+          return
+        }
         needsFullReset = true
         resetTriggerY = y
         return true // early exit
@@ -381,11 +448,17 @@ export class LogUpdate {
       }
     })
     if (needsFullReset) {
-      return fullResetSequence_CAUSES_FLICKER(next, 'offscreen', stylePool, {
-        triggerY: resetTriggerY,
-        prevLine: readLine(prev.screen, resetTriggerY),
-        nextLine: readLine(next.screen, resetTriggerY),
-      })
+      return fullResetSequence_CAUSES_FLICKER(
+        next,
+        'offscreen',
+        stylePool,
+        {
+          triggerY: resetTriggerY,
+          prevLine: readLine(prev.screen, resetTriggerY),
+          nextLine: readLine(next.screen, resetTriggerY),
+        },
+        altScreen,
+      )
     }
 
     // Reset styles before rendering new rows (they'll set their own styles)
@@ -506,7 +579,43 @@ function fullResetSequence_CAUSES_FLICKER(
   reason: FlickerReason,
   stylePool: StylePool,
   debug?: { triggerY: number; prevLine: string; nextLine: string },
+  altScreen = false,
 ): Diff {
+  // [ccb mod] Degraded reset on terminals that ignore CSI 3J (zellij) — and
+  // ALWAYS in alt-screen. The stock path clears screen+scrollback then
+  // LF-repushes the WHOLE frame (which can be taller than the viewport) — the
+  // top rows scroll back into the scrollback buffer. That's correct when 3J
+  // actually erased the old scrollback, but when 3J is a no-op the old copy
+  // survives and every reset appends another full transcript copy ("scroll up
+  // shows tons of duplicate rows"). Degraded path: erase the viewport in place
+  // (2J + home, no 3J) and repaint ONLY the viewport-tail slice, so nothing
+  // new is pushed into the scrollback. The virtual cursor starts at startY so
+  // renderFrameSlice emits no leading LF run; the trailing-newline/cursor end
+  // state matches the stock path (cursor at (0, screen.height), bottom row +
+  // the "+1 row pushed by cursor-restore scroll" the scrollback accounting
+  // already assumes). Trade-off: top-of-scrollback rows can go slightly stale
+  // after shrink/offscreen resets — strictly better than duplicating history.
+  //
+  // Alt-screen is degraded unconditionally (even when canEraseScrollback() is
+  // true): 3J's effect on ALTERNATE-screen scrollback is unverified across
+  // terminals — iTerm2 with "Save lines to scrollback in alternate screen
+  // mode" leaves the old copies in place (confirmed 2026-09-18: identical
+  // tool-result blocks duplicated 4× in scrollback, TERM_PROGRAM not forwarded
+  // over ssh so canEraseScrollback() wrongly trusted 3J). The REPL always runs
+  // in alt-screen, and a reset there only needs the VISIBLE window repainted —
+  // the 3J re-push buys scrollback freshness at the cost of catastrophic
+  // duplication whenever the terminal ignores 3J. Degraded is strictly safer.
+  if ((altScreen || !canEraseScrollback()) && frame.viewport.height > 0) {
+    // max(0, …): when the frame fits the viewport (shrink-to-below case)
+    // repaint the WHOLE frame from row 0 instead of a tail slice.
+    const startY = Math.max(0, frame.screen.height - frame.viewport.height)
+    const tailScreen = new VirtualScreen(
+      { x: 0, y: startY },
+      frame.viewport.width,
+    )
+    renderFrameSlice(tailScreen, frame, startY, frame.screen.height, stylePool)
+    return [{ type: 'clearViewport', reason, debug }, ...tailScreen.diff]
+  }
   // After clearTerminal, cursor is at (0, 0)
   const screen = new VirtualScreen({ x: 0, y: 0 }, frame.viewport.width)
   renderFrame(screen, frame, stylePool)

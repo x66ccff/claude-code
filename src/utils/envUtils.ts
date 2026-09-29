@@ -1,5 +1,6 @@
+import { feature } from 'bun:bundle'
 import memoize from 'lodash-es/memoize.js'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
 import { join } from 'path'
 
 // Memoized: 150+ callers, many on hot paths. Keyed off CLAUDE_CONFIG_DIR so
@@ -27,6 +28,30 @@ export function hasNodeOption(flag: string): boolean {
     return false
   }
   return nodeOptions.split(/\s+/).includes(flag)
+}
+
+/**
+ * Hostnames of Alibaba PAI containers start with dsw-/dlc- (e.g.
+ * dsw-883935-74b9658444-624v7). Exported so the read side can validate
+ * string-scraped JSONL values with the same predicate used at write time.
+ */
+export function isRecordableSessionHostname(host: string): boolean {
+  return /^(dsw|dlc)/i.test(host)
+}
+
+/**
+ * Hostname to stamp into session transcripts, or undefined when recording is
+ * disabled (flag off, non-linux, or non-PAI machine). Called once per message
+ * chain in Project.insertMessageChain — os.hostname() is a cheap uname(2)
+ * syscall (the same chain already spawns git for getBranch), so no
+ * memoization. NOTE: feature() must stay in condition position (Bun
+ * compiler restriction).
+ */
+export function getRecordedSessionHostname(): string | undefined {
+  if (!feature('RESUME_HOSTNAME')) return undefined
+  if (process.platform !== 'linux') return undefined
+  const host = hostname()
+  return isRecordableSessionHostname(host) ? host : undefined
 }
 
 export function isEnvTruthy(envVar: string | boolean | undefined): boolean {

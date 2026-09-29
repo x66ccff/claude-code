@@ -19,7 +19,17 @@ export interface CacheHitRateInfo {
 interface CacheWarningState {
   lastHitRate: number | null
   lastTimestamp: number | null
+  lastWarnTimestamp: number | null
+  lastWarnHitRate: number | null
 }
+
+// 注入冷却。没有冷却时，一个 0% 命中的长回合每次 API 往返都会往 transcript
+// 注入一条相同的警告消息：既是噪音，又会让 messages.length 在用户上翻过程中
+// 反复变化——虚拟滚动的锚定补偿以 n 不变为前提（useVirtualScroll），每条注入
+// 都制造一次"锚定失效窗口"，表现为上翻时同一内容区被反复"回放"。
+// 同一 source 在冷却窗口内最多警告一次，除非命中率显著恶化。
+const WARN_COOLDOWN_MS = 5 * 60 * 1000
+const WARN_WORSEN_PP = 10
 
 // 模块级状态，每个 querySource 独立跟踪
 const cacheWarningStateBySource = new Map<string, CacheWarningState>()
@@ -30,7 +40,7 @@ const cacheWarningStateBySource = new Map<string, CacheWarningState>()
 // Evict the oldest entry (by insertion order) when the limit is exceeded.
 const MAX_SOURCE_ENTRIES = 50
 
-const DEFAULT_CACHE_THRESHOLD = 80
+const DEFAULT_CACHE_THRESHOLD = 70
 
 /**
  * 从 settings.json 读取缓存阈值配置
@@ -94,7 +104,12 @@ export function shouldShowCacheWarning(
   // 获取或初始化该 querySource 的状态
   let state = cacheWarningStateBySource.get(querySource)
   if (!state) {
-    state = { lastHitRate: null, lastTimestamp: null }
+    state = {
+      lastHitRate: null,
+      lastTimestamp: null,
+      lastWarnTimestamp: null,
+      lastWarnHitRate: null,
+    }
     // Evict oldest entry when at capacity so the Map stays bounded
     if (cacheWarningStateBySource.size >= MAX_SOURCE_ENTRIES) {
       const oldestKey = cacheWarningStateBySource.keys().next().value
@@ -119,9 +134,20 @@ export function shouldShowCacheWarning(
   state.lastHitRate = hitRate
   state.lastTimestamp = Date.now()
 
-  // 检查是否需要警告
+  // 检查是否需要警告（带冷却，见 WARN_COOLDOWN_MS 注释）
   if (hitRate < threshold) {
-    return { hitRate, threshold, trend, shouldWarn: true }
+    const now = Date.now()
+    const cooledDown =
+      state.lastWarnTimestamp === null ||
+      now - state.lastWarnTimestamp >= WARN_COOLDOWN_MS ||
+      (state.lastWarnHitRate !== null &&
+        hitRate <= state.lastWarnHitRate - WARN_WORSEN_PP)
+    if (cooledDown) {
+      state.lastWarnTimestamp = now
+      state.lastWarnHitRate = hitRate
+      return { hitRate, threshold, trend, shouldWarn: true }
+    }
+    return null
   }
 
   return null

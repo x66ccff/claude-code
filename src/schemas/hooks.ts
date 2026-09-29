@@ -44,6 +44,7 @@ function buildHookSchemas() {
       .positive()
       .optional()
       .describe('Timeout in seconds for this specific command'),
+    name: z.string().optional().describe('Human-readable Hook name'),
     statusMessage: z
       .string()
       .optional()
@@ -84,6 +85,7 @@ function buildHookSchemas() {
       .describe(
         'Model to use for this prompt hook (e.g., "claude-sonnet-4-6"). If not specified, uses the default small fast model.',
       ),
+    name: z.string().optional().describe('Human-readable Hook name'),
     statusMessage: z
       .string()
       .optional()
@@ -113,6 +115,7 @@ function buildHookSchemas() {
       .describe(
         'Explicit list of environment variable names that may be interpolated in header values. Only variables listed here will be resolved; all other $VAR references are left as empty strings. Required for env var interpolation to work.',
       ),
+    name: z.string().optional().describe('Human-readable Hook name'),
     statusMessage: z
       .string()
       .optional()
@@ -150,6 +153,7 @@ function buildHookSchemas() {
       .describe(
         'Model to use for this agent hook (e.g., "claude-sonnet-4-6"). If not specified, uses Haiku.',
       ),
+    name: z.string().optional().describe('Human-readable Hook name'),
     statusMessage: z
       .string()
       .optional()

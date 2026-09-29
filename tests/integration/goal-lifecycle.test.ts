@@ -229,10 +229,10 @@ describe('Goal prompt templates', () => {
 })
 
 describe('Format helpers', () => {
-  test('formatGoalStatusLabel returns human-readable labels', () => {
-    expect(formatGoalStatusLabel('active')).toBe('Active')
-    expect(formatGoalStatusLabel('budget_limited')).toBe('Budget Limited')
-    expect(formatGoalStatusLabel('complete')).toBe('Complete')
+  test('formatGoalStatusLabel returns explicit goal labels', () => {
+    expect(formatGoalStatusLabel('active')).toBe('goal running')
+    expect(formatGoalStatusLabel('budget_limited')).toBe('goal budget limited')
+    expect(formatGoalStatusLabel('complete')).toBe('goal achieved')
   })
 
   test('getActiveElapsedMs returns accumulated time for paused goals', () => {

@@ -1,14 +1,17 @@
 import * as React from 'react';
 import { useMemo } from 'react';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import { Ansi, Text } from '@anthropic/ink';
+import { Ansi, Box, Text, KeyboardShortcutHint, getTheme, stringWidth, useTheme } from '@anthropic/ink';
+import { useShortcutDisplay } from '../../keybindings/useShortcutDisplay.js';
 import { createHyperlink } from '../../utils/hyperlink.js';
 
 import { jsonParse, jsonStringify } from '../../utils/slowOperations.js';
-import { renderTruncatedContent } from '../../utils/terminal.js';
-import { MessageResponse } from '../MessageResponse.js';
+import { getOutputPreview } from '../../utils/terminal.js';
+import { MessageResponse, ToolDurationContext } from '../MessageResponse.js';
 import { InVirtualListContext } from '../messageActions.js';
-import { useExpandShellOutput } from './ExpandShellOutputContext.js';
+import { interpolateColor, parseRGB, toRGBColor } from '../Spinner/utils.js';
+import { ToolOutputExpansionContext, useExpandShellOutput } from './ExpandShellOutputContext.js';
+import { isFullscreenActive, isMouseTrackingEnabled, isMouseClicksDisabled } from '../../utils/fullscreen.js';
 
 export function tryFormatJson(line: string): string {
   try {
@@ -65,31 +68,110 @@ export function OutputLine({
   linkifyUrls?: boolean;
 }): React.ReactNode {
   const { columns } = useTerminalSize();
-  // Context-based expansion for latest user shell output (from ! commands)
   const expandShellOutput = useExpandShellOutput();
   const inVirtualList = React.useContext(InVirtualListContext);
-
-  // Show full output if verbose mode OR if this is the latest user shell output
+  const durationText = React.useContext(ToolDurationContext);
+  const availableColumns = columns - (durationText ? stringWidth(durationText) + 3 : 0);
+  const [themeName] = useTheme();
+  const theme = getTheme(themeName);
+  const expandShortcut = useShortcutDisplay('app:toggleTranscript', 'Global', 'ctrl+o');
+  const expansion = React.useContext(ToolOutputExpansionContext);
+  const [locallyExpanded, setLocallyExpanded] = React.useState(false);
+  const expanded = expansion?.expanded ?? locallyExpanded;
+  const canClick = isFullscreenActive() && isMouseTrackingEnabled() && !isMouseClicksDisabled();
   const shouldShowFull = verbose || expandShellOutput;
+  const toggle = expansion?.toggle ?? (() => setLocallyExpanded(value => !value));
 
   const formattedContent = useMemo(() => {
     let formatted = tryJsonFormatContent(content);
     if (linkifyUrls) {
       formatted = linkifyUrlsInText(formatted);
     }
-    if (shouldShowFull) {
-      return stripUnderlineAnsi(formatted);
-    }
-    return stripUnderlineAnsi(renderTruncatedContent(formatted, columns, inVirtualList));
-  }, [content, shouldShowFull, columns, linkifyUrls, inVirtualList]);
+    return stripUnderlineAnsi(formatted);
+  }, [content, linkifyUrls]);
+  const preview = useMemo(
+    () => (shouldShowFull || expanded ? null : getOutputPreview(formattedContent, availableColumns)),
+    [formattedContent, shouldShowFull, expanded, availableColumns],
+  );
 
   const color = isError ? 'error' : isWarning ? 'warning' : undefined;
+  const baseColor = color ?? 'text';
+  const foreground = parseRGB(theme[baseColor]);
+  const inactive = parseRGB(theme.inactive);
+  const rowColors = [0, 0.35, 0.7].map((amount, index) =>
+    foreground && inactive
+      ? toRGBColor(interpolateColor(foreground, inactive, amount))
+      : index === 2
+        ? ('inactive' as const)
+        : baseColor,
+  );
+
+  const collapseControl =
+    canClick && expanded && !expandShellOutput ? (
+      <Box
+        alignSelf="flex-start"
+        onClick={event => {
+          event.stopImmediatePropagation();
+          toggle();
+        }}
+      >
+        <Text color="inactive">[click to collapse]</Text>
+      </Box>
+    ) : null;
 
   return (
     <MessageResponse>
-      <Text color={color}>
-        <Ansi>{formattedContent}</Ansi>
-      </Text>
+      <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+        {expanded || shouldShowFull ? (
+          <>
+            {collapseControl}
+            <Text color={color}>
+              <Ansi>{formattedContent}</Ansi>
+            </Text>
+            {collapseControl}
+          </>
+        ) : preview && preview.hiddenLines > 0 ? (
+          <>
+            {preview.head.map((line, index) => (
+              <Text key={`head-${index}`} color={rowColors[index]}>
+                <Ansi>{line || ' '}</Ansi>
+              </Text>
+            ))}
+            <Box
+              alignSelf="flex-start"
+              onClick={
+                canClick
+                  ? event => {
+                      event.stopImmediatePropagation();
+                      toggle();
+                    }
+                  : undefined
+              }
+            >
+              <Text dimColor>
+                … {preview.approximate ? '≈' : '+'}
+                {preview.hiddenLines} lines
+                {canClick && ' (click to expand)'}
+                {!inVirtualList && (
+                  <>
+                    {' '}
+                    <KeyboardShortcutHint shortcut={expandShortcut} action="expand" parens />
+                  </>
+                )}
+              </Text>
+            </Box>
+            {preview.tail.map((line, index) => (
+              <Text key={`tail-${index}`} color={rowColors[preview.tail.length - index - 1]}>
+                <Ansi>{line || ' '}</Ansi>
+              </Text>
+            ))}
+          </>
+        ) : (
+          <Text color={color}>
+            <Ansi>{preview ? preview.head.join('\n') : formattedContent}</Ansi>
+          </Text>
+        )}
+      </Box>
     </MessageResponse>
   );
 }

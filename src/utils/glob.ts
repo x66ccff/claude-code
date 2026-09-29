@@ -1,4 +1,13 @@
-import { basename, dirname, isAbsolute, join, sep } from 'path'
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'path'
+import { homedir } from 'os'
 import type { ToolPermissionContext } from '../Tool.js'
 import { isEnvTruthy } from './envUtils.js'
 import {
@@ -63,6 +72,40 @@ export function extractGlobBaseDirectory(pattern: string): {
   return { baseDir, relativePattern }
 }
 
+const MACOS_HOME_PRIVACY_DIRS = ['Library', '.Trash'] as const
+
+/**
+ * Prevent broad globs rooted at (or above) the macOS home directory from
+ * traversing app-data locations that trigger TCC prompts. An explicitly
+ * targeted relative or absolute privacy path remains accessible.
+ */
+export function getMacOSHomePrivacyExclusions(
+  searchDir: string,
+  searchPattern: string,
+  homeDir = homedir(),
+  platform: ReturnType<typeof getPlatform> = getPlatform(),
+): string[] {
+  if (platform !== 'macos') return []
+
+  const relativeHome = relative(resolve(searchDir), resolve(homeDir))
+  if (relativeHome.startsWith('..') || isAbsolute(relativeHome)) return []
+
+  const homePrefix = relativeHome.split(sep).join('/')
+  const normalizedPattern = searchPattern
+    .split(sep)
+    .join('/')
+    .replace(/^\.\//, '')
+
+  return MACOS_HOME_PRIVACY_DIRS.flatMap(directory => {
+    const privacyPath = homePrefix ? `${homePrefix}/${directory}` : directory
+    const explicitlyTargetsPrivacyPath =
+      normalizedPattern === privacyPath ||
+      normalizedPattern.startsWith(`${privacyPath}/`)
+
+    return explicitlyTargetsPrivacyPath ? [] : [`!${privacyPath}/**`]
+  })
+}
+
 export async function glob(
   filePattern: string,
   cwd: string,
@@ -105,6 +148,16 @@ export async function glob(
     ...(noIgnore ? ['--no-ignore'] : []),
     ...(hidden ? ['--hidden'] : []),
   ]
+
+  // Positive --glob patterns override ripgrep ignore files. Add explicit
+  // exclusions after the search pattern so broad searches cannot traverse
+  // macOS app-data directories and trigger TCC prompts.
+  for (const exclusion of getMacOSHomePrivacyExclusions(
+    searchDir,
+    searchPattern,
+  )) {
+    args.push('--glob', exclusion)
+  }
 
   // Add ignore patterns
   for (const pattern of ignorePatterns) {

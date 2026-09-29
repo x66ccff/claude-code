@@ -1,8 +1,22 @@
-import { expect, test } from 'bun:test'
+import { afterAll, beforeAll, expect, test } from 'bun:test'
 // DI pattern: do not use mock.module (process-global, last-write-wins, would pollute other tests in the same process such as
 // autonomy.test.ts). Instead hand-construct FAKE WorkflowPorts: registry.run returns a fixed ok
 // result, taskRegistrar maintains abort bindings, journalStore is an in-memory empty impl. The real runWorkflow
 // thus runs to completion without needing LLM or mocks.
+
+// [agent-error-backoff patch] Transient-failure retries use exponential backoff; keep them instant in
+// tests (base 0) while leaving the retry COUNT at the production default (5). Save/restore because env
+// is process-global and bun runs every test file in one process.
+let savedErrorBackoff: string | undefined
+beforeAll(() => {
+  savedErrorBackoff = process.env.CCB_AGENT_ERROR_BACKOFF_MS
+  process.env.CCB_AGENT_ERROR_BACKOFF_MS = '0'
+})
+afterAll(() => {
+  if (savedErrorBackoff === undefined)
+    delete process.env.CCB_AGENT_ERROR_BACKOFF_MS
+  else process.env.CCB_AGENT_ERROR_BACKOFF_MS = savedErrorBackoff
+})
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -395,19 +409,20 @@ test('script run throws → service routes to taskRegistrar.fail, with error tex
   expect(fail?.kind === 'fail' && fail.error).toMatch(/script boom/)
 })
 
-test('adapter throws → retry still throws → degrade to dead → workflow completed (not fail)', async () => {
+test('adapter throws → exhausts backoff retries → degrade to dead → workflow completed (not fail)', async () => {
   __resetWorkflowServiceForTests()
-  // new semantics: agent non-abort throw → retry once → still throws → degrade to dead (agent returns null),
-  // workflow continues and completes. Retry tolerates transient failures (429/network), but a permanently
-  // broken agent does not break through the entire workflow (consistent with parallel/pipeline null-on-error contract).
+  // new semantics: agent non-abort throw is transient → exponential-backoff retries (default 5, instant
+  // in tests) → still throws → degrade to dead (agent returns null), workflow continues and completes.
+  // Retry tolerates transient failures (429/network), but a permanently broken agent does not break
+  // through the entire workflow (consistent with parallel/pipeline null-on-error contract).
   const { ports, store, calls, adapterCallsRef } = fakePorts({
     adapterThrow: 'adapter boom',
   })
   const svc = makeService(ports, store)
   await svc.launch({ script: `return agent('x')` }, stubTUC, stubCanUseTool)
   await settle()
-  // retry once → adapter called 2 times
-  expect(adapterCallsRef.value).toBe(2)
+  // 1 initial + 5 transient backoff retries (CCB_AGENT_ERROR_MAX_RETRIES default) → adapter called 6 times
+  expect(adapterCallsRef.value).toBe(6)
   // workflow normal completed, not failed
   const complete = calls.find(c => c.kind === 'complete')
   expect(complete).toBeDefined()

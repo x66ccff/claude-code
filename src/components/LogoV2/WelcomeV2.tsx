@@ -18,7 +18,7 @@ export function WelcomeV2(): React.ReactNode {
         <Text>
           <Text>
             <Text color="claude">{welcomeMessage} </Text>
-            <Text dimColor>v{MACRO.VERSION} </Text>
+            <Text dimColor>v{MACRO.BUILD_VERSION} </Text>
           </Text>
           <Text>{'…………………………………………………………………………………………………………………………………………………………'}</Text>
           <Text>{'                                                          '}</Text>
@@ -69,7 +69,7 @@ export function WelcomeV2(): React.ReactNode {
       <Text>
         <Text>
           <Text color="claude">{welcomeMessage} </Text>
-          <Text dimColor>v{MACRO.VERSION} </Text>
+          <Text dimColor>v{MACRO.BUILD_VERSION} </Text>
         </Text>
         <Text>{'…………………………………………………………………………………………………………………………………………………………'}</Text>
         <Text>{'                                                          '}</Text>
@@ -129,7 +129,7 @@ function AppleTerminalWelcomeV2({ theme, welcomeMessage }: AppleTerminalWelcomeV
         <Text>
           <Text>
             <Text color="claude">{welcomeMessage} </Text>
-            <Text dimColor>v{MACRO.VERSION} </Text>
+            <Text dimColor>v{MACRO.BUILD_VERSION} </Text>
           </Text>
           <Text>{'…………………………………………………………………………………………………………………………………………………………'}</Text>
           <Text>{'                                                          '}</Text>
@@ -185,7 +185,7 @@ function AppleTerminalWelcomeV2({ theme, welcomeMessage }: AppleTerminalWelcomeV
       <Text>
         <Text>
           <Text color="claude">{welcomeMessage} </Text>
-          <Text dimColor>v{MACRO.VERSION} </Text>
+          <Text dimColor>v{MACRO.BUILD_VERSION} </Text>
         </Text>
         <Text>{'…………………………………………………………………………………………………………………………………………………………'}</Text>
         <Text>{'                                                          '}</Text>

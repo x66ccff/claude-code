@@ -1,6 +1,7 @@
 import type { BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { ChatCompletionChunk } from 'openai/resources/chat/completions/completions.mjs'
 import { randomUUID } from 'crypto'
+import { normalizeOpenAIUsage } from './openaiUsage.js'
 
 /**
  * Adapt an OpenAI streaming response into Anthropic BetaRawMessageStreamEvent.
@@ -14,11 +15,11 @@ import { randomUUID } from 'crypto'
  *   finish_reason            → message_delta(stop_reason) + message_stop
  *
  * Usage field mapping (OpenAI → Anthropic):
- *   prompt_tokens - cached_tokens             → input_tokens (non-cached input only)
+ *   prompt_tokens - cached_tokens - cache_write_tokens → input_tokens
  *   completion_tokens                         → output_tokens
  *   completion_tokens_details.reasoning_tokens → thinking_tokens
  *   prompt_tokens_details.cached_tokens       → cache_read_input_tokens
- *   (no OpenAI equivalent)                    → cache_creation_input_tokens (always 0)
+ *   prompt_tokens_details.cache_write_tokens  → cache_creation_input_tokens
  *
  *   All four fields are emitted in the post-loop message_delta (not message_start)
  *   so that trailing usage chunks (sent after finish_reason by some
@@ -39,6 +40,7 @@ import { randomUUID } from 'crypto'
 export async function* adaptOpenAIStreamToAnthropic(
   stream: AsyncIterable<ChatCompletionChunk>,
   model: string,
+  options?: { includeCacheWriteTokens?: boolean },
 ): AsyncGenerator<BetaRawMessageStreamEvent, void> {
   const messageId = `msg_${randomUUID().replace(/-/g, '').slice(0, 24)}`
 
@@ -57,13 +59,13 @@ export async function* adaptOpenAIStreamToAnthropic(
   // Track text block state
   let textBlockOpen = false
 
-  // Track usage — all four Anthropic fields, populated from OpenAI usage fields.
-  // OpenAI prompt_tokens includes cached tokens, while Anthropic input_tokens
-  // excludes them, so keep the raw total and derive the non-cached count.
+  // Track raw OpenAI usage across chunks. The normalized Anthropic fields are
+  // disjoint: ordinary input + cache reads + cache writes = total input.
   let rawInputTokens = 0
-  let inputTokens = 0
   let outputTokens = 0
-  let cachedReadTokens = 0
+  let rawCacheReadTokens = 0
+  let rawCacheWriteTokens = 0
+  let usage = normalizeOpenAIUsage({ totalInputTokens: 0, outputTokens: 0 })
   let thinkingTokens: number | undefined
 
   // Track all open content block indices (for cleanup)
@@ -81,15 +83,36 @@ export async function* adaptOpenAIStreamToAnthropic(
     if (chunk.usage) {
       rawInputTokens = chunk.usage.prompt_tokens ?? rawInputTokens
       outputTokens = chunk.usage.completion_tokens ?? outputTokens
-      const extendedUsage = chunk.usage as typeof chunk.usage & {
-        completion_tokens_details?: { reasoning_tokens?: unknown }
+
+      const usageRecord = chunk.usage as unknown as Record<string, unknown>
+      const detailsValue = usageRecord.prompt_tokens_details
+      const details =
+        detailsValue && typeof detailsValue === 'object'
+          ? (detailsValue as Record<string, unknown>)
+          : undefined
+      if (typeof details?.cached_tokens === 'number') {
+        rawCacheReadTokens = details.cached_tokens
       }
-      if (extendedUsage.prompt_tokens_details?.cached_tokens != null) {
-        cachedReadTokens = extendedUsage.prompt_tokens_details.cached_tokens
+      if (
+        options?.includeCacheWriteTokens &&
+        typeof details?.cache_write_tokens === 'number'
+      ) {
+        rawCacheWriteTokens = details.cache_write_tokens
+      } else if (!options?.includeCacheWriteTokens) {
+        rawCacheWriteTokens = 0
       }
-      inputTokens = Math.max(0, rawInputTokens - cachedReadTokens)
-      const reportedThinkingTokens =
-        extendedUsage.completion_tokens_details?.reasoning_tokens
+
+      usage = normalizeOpenAIUsage({
+        totalInputTokens: rawInputTokens,
+        outputTokens,
+        cacheReadTokens: rawCacheReadTokens,
+        cacheWriteTokens: rawCacheWriteTokens,
+      })
+      const reportedThinkingTokens = (
+        usageRecord.completion_tokens_details as
+          | { reasoning_tokens?: unknown }
+          | undefined
+      )?.reasoning_tokens
       if (
         typeof reportedThinkingTokens === 'number' &&
         Number.isFinite(reportedThinkingTokens) &&
@@ -114,10 +137,8 @@ export async function* adaptOpenAIStreamToAnthropic(
           stop_reason: null,
           stop_sequence: null,
           usage: {
-            input_tokens: inputTokens,
+            ...usage,
             output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: cachedReadTokens,
           },
         },
       } as unknown as BetaRawMessageStreamEvent
@@ -137,7 +158,12 @@ export async function* adaptOpenAIStreamToAnthropic(
       providerDelta.reasoning_content != null || providerDelta.reasoning != null
     const reasoningContent =
       providerDelta.reasoning_content ?? providerDelta.reasoning
-    if (hasReasoningField && typeof reasoningContent === 'string') {
+    if (
+      hasReasoningField &&
+      typeof reasoningContent === 'string' &&
+      !textBlockOpen &&
+      toolBlocks.size === 0
+    ) {
       if (!thinkingBlockOpen) {
         currentContentIndex++
         thinkingBlockOpen = true
@@ -330,10 +356,7 @@ export async function* adaptOpenAIStreamToAnthropic(
         stop_sequence: null,
       },
       usage: {
-        input_tokens: inputTokens,
-        output_tokens: outputTokens,
-        cache_read_input_tokens: cachedReadTokens,
-        cache_creation_input_tokens: 0,
+        ...usage,
         ...(thinkingTokens !== undefined
           ? { thinking_tokens: thinkingTokens }
           : {}),

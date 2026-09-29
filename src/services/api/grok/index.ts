@@ -16,6 +16,7 @@ import type {
   ChatCompletionCreateParamsStreaming,
 } from 'openai/resources/chat/completions/completions.mjs'
 import { getGrokClient } from './client.js'
+import { shouldCaptureRawRequest } from '../rawRequestSnapshot.js'
 import { updateOpenAIUsage } from '../openai/openaiShared.js'
 import {
   anthropicMessagesToOpenAI,
@@ -28,6 +29,11 @@ import { normalizeMessagesForAPI } from '../../../utils/messages.js'
 import type { SDKAssistantMessageError } from '../../../entrypoints/agentSdkTypes.js'
 import { toolToAPISchema } from '../../../utils/api.js'
 import { logForDebugging } from '../../../utils/debug.js'
+import {
+  isAbortError,
+  isAnthropicStreamOutput,
+  retryRateLimitStream,
+} from '../rateLimitRetry.js'
 import { addToTotalSessionCost } from '../../../cost-tracker.js'
 import { calculateUSDCost } from '../../../utils/modelCost.js'
 import { recordLLMObservation } from '../../../services/langfuse/tracing.js'
@@ -90,37 +96,47 @@ export async function* queryModelGrok(
     const openaiToolChoice = anthropicToolChoiceToOpenAI(options.toolChoice)
 
     const client = getGrokClient({
-      maxRetries: 0,
       fetchOverride: options.fetchOverride as typeof fetch | undefined,
       source: options.querySource,
+      captureRawRequest: shouldCaptureRawRequest(options.querySource),
     })
 
     logForDebugging(
       `[Grok] Calling model=${grokModel}, messages=${openaiMessages.length}, tools=${openaiTools.length}`,
     )
 
-    const stream = await client.chat.completions.create(
+    // Rate-limit retries replay the whole create+adapt pipeline, but only
+    // until real output has been emitted downstream (no-replay boundary).
+    const adaptedStream = retryRateLimitStream(
+      async () => {
+        const stream = await client.chat.completions.create(
+          {
+            model: grokModel,
+            messages: openaiMessages,
+            ...(openaiTools.length > 0 && {
+              tools: openaiTools,
+              ...(openaiToolChoice && { tool_choice: openaiToolChoice }),
+            }),
+            stream: true,
+            stream_options: { include_usage: true },
+            ...(options.temperatureOverride !== undefined && {
+              temperature: options.temperatureOverride,
+            }),
+          } as ChatCompletionCreateParamsStreaming,
+          {
+            signal,
+          },
+        )
+
+        return adaptOpenAIStreamToAnthropic(
+          stream as AsyncIterable<ChatCompletionChunk>,
+          grokModel,
+        )
+      },
       {
-        model: grokModel,
-        messages: openaiMessages,
-        ...(openaiTools.length > 0 && {
-          tools: openaiTools,
-          ...(openaiToolChoice && { tool_choice: openaiToolChoice }),
-        }),
-        stream: true,
-        stream_options: { include_usage: true },
-        ...(options.temperatureOverride !== undefined && {
-          temperature: options.temperatureOverride,
-        }),
-      } as ChatCompletionCreateParamsStreaming,
-      {
+        hasOutput: isAnthropicStreamOutput,
         signal,
       },
-    )
-
-    const adaptedStream = adaptOpenAIStreamToAnthropic(
-      stream as AsyncIterable<ChatCompletionChunk>,
-      grokModel,
     )
 
     const contentBlocks: Record<number, Record<string, unknown>> = {}
@@ -264,6 +280,11 @@ export async function* queryModelGrok(
       tools: convertToolsToLangfuse(toolSchemas as unknown[]),
     })
   } catch (error) {
+    // User aborts must never surface as an "API Error" assistant message.
+    if (isAbortError(error, signal)) {
+      logForDebugging('[Grok] Request aborted by user')
+      return
+    }
     const errorMessage = error instanceof Error ? error.message : String(error)
     logForDebugging(`[Grok] Error: ${errorMessage}`, { level: 'error' })
     yield createAssistantAPIErrorMessage({

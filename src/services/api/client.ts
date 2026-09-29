@@ -17,6 +17,7 @@ import {
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
+import { wrapFetchForRawRequest } from './rawRequestSnapshot.js'
 import {
   getIsNonInteractiveSession,
   getSessionId,
@@ -87,12 +88,14 @@ export async function getAnthropicClient({
   model,
   fetchOverride,
   source,
+  captureRawRequest = false,
 }: {
   apiKey?: string
   maxRetries: number
   model?: string
   fetchOverride?: ClientOptions['fetch']
   source?: string
+  captureRawRequest?: boolean
 }): Promise<Anthropic> {
   const containerId = process.env.CLAUDE_CODE_CONTAINER_ID
   const remoteSessionId = process.env.CLAUDE_CODE_REMOTE_SESSION_ID
@@ -136,7 +139,7 @@ export async function getAnthropicClient({
     await configureApiKeyHeaders(defaultHeaders, getIsNonInteractiveSession())
   }
 
-  const resolvedFetch = buildFetch(fetchOverride, source)
+  const resolvedFetch = buildFetch(fetchOverride, source, captureRawRequest)
 
   const ARGS = {
     defaultHeaders,
@@ -358,14 +361,16 @@ export const CLIENT_REQUEST_ID_HEADER = 'x-client-request-id'
 function buildFetch(
   fetchOverride: ClientOptions['fetch'],
   source: string | undefined,
+  captureRawRequest: boolean,
 ): ClientOptions['fetch'] {
   // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
   const inner = fetchOverride ?? globalThis.fetch
   // Only send to the first-party API — Bedrock/Vertex/Foundry don't log it
   // and unknown headers risk rejection by strict proxies (inc-4029 class).
+  const provider = getAPIProvider()
   const injectClientRequestId =
-    getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()
-  return (input, init) => {
+    provider === 'firstParty' && isFirstPartyAnthropicBaseUrl()
+  const requestFetch: ClientOptions['fetch'] = (input, init) => {
     // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
     const headers = new Headers(init?.headers)
     // Generate a client-side request ID so timeouts (which return no server
@@ -386,4 +391,10 @@ function buildFetch(
     }
     return inner(input, { ...init, headers })
   }
+  return captureRawRequest
+    ? (wrapFetchForRawRequest(
+        requestFetch as typeof fetch,
+        provider,
+      ) as ClientOptions['fetch'])
+    : requestFetch
 }

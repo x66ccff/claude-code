@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import type { LogOption } from 'src/types/logs.js'
 
 const MAX_CACHED_ENTRIES = 200 // mirrors MAX_CACHED_SESSION_FILES in sessionStorage.ts
 
@@ -9,6 +10,7 @@ const {
   getSessionMessages,
   getSessionMessagesCache,
   clearSessionMessagesCache,
+  enrichLogs,
 } = await import('../sessionStorage.js')
 
 function asUuid(s: string): any {
@@ -147,5 +149,91 @@ describe('getSessionMessages bounded cache (memory leak fix)', () => {
       await getSessionMessages(asUuid(`refill-${i}`))
     }
     expect(cache.size).toBe(MAX_CACHED_ENTRIES)
+  })
+})
+
+// ─── enrichLogs hostname extraction (/resume picker, dsw/dlc hosts) ───
+
+describe('enrichLogs hostname extraction', () => {
+  function transcriptLine(fields: Record<string, unknown>): string {
+    return JSON.stringify({
+      type: 'user',
+      parentUuid: null,
+      isSidechain: false,
+      cwd: '/tmp/proj',
+      sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      timestamp: new Date().toISOString(),
+      version: '2.8.4',
+      message: { role: 'user', content: 'hello world' },
+      ...fields,
+    })
+  }
+
+  function liteLog(filePath: string): LogOption {
+    return {
+      date: new Date().toISOString(),
+      messages: [],
+      value: 0,
+      created: new Date(),
+      modified: new Date(),
+      firstPrompt: '',
+      messageCount: 0,
+      fileSize: statSync(filePath).size,
+      isSidechain: false,
+      isLite: true,
+      fullPath: filePath,
+      sessionId: asUuid('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'),
+    }
+  }
+
+  async function enrichSingle(filePath: string): Promise<LogOption> {
+    const { logs } = await enrichLogs([liteLog(filePath)], 0, 1)
+    expect(logs.length).toBe(1)
+    return logs[0]!
+  }
+
+  test('extracts hostname from head of transcript', async () => {
+    const file = join(tempDir, 'host-basic.jsonl')
+    writeFileSync(
+      file,
+      [
+        transcriptLine({ hostname: 'dsw-1-abc' }),
+        transcriptLine({ hostname: 'dsw-1-abc' }),
+      ].join('\n') + '\n',
+    )
+    const log = await enrichSingle(file)
+    expect(log.hostname).toBe('dsw-1-abc')
+  })
+
+  test('discards scraped hostname not matching dsw/dlc (guard)', async () => {
+    const file = join(tempDir, 'host-guard.jsonl')
+    writeFileSync(file, transcriptLine({ hostname: 'my-laptop' }) + '\n')
+    const log = await enrichSingle(file)
+    expect(log.hostname).toBeUndefined()
+  })
+
+  test('prefers HEAD hostname over tail (cross-machine resume)', async () => {
+    const file = join(tempDir, 'host-head-wins.jsonl')
+    // Filler pushes the final line outside the 64KB head buffer, so head
+    // and tail are distinct regions of the file.
+    const filler = transcriptLine({
+      message: { role: 'user', content: 'x'.repeat(2000) },
+    })
+    const lines = [transcriptLine({ hostname: 'dsw-aaa' })]
+    for (let i = 0; i < 40; i++) {
+      lines.push(filler)
+    }
+    lines.push(transcriptLine({ hostname: 'dlc-bbb' }))
+    writeFileSync(file, lines.join('\n') + '\n')
+    expect(statSync(file).size).toBeGreaterThan(65536)
+    const log = await enrichSingle(file)
+    expect(log.hostname).toBe('dsw-aaa')
+  })
+
+  test('returns undefined hostname for pre-feature sessions', async () => {
+    const file = join(tempDir, 'host-absent.jsonl')
+    writeFileSync(file, transcriptLine({}) + '\n')
+    const log = await enrichSingle(file)
+    expect(log.hostname).toBeUndefined()
   })
 })

@@ -31,6 +31,13 @@ export type AgentRunParams = {
 export type AgentProgressUpdate = {
   tokenCount: number
   toolCount: number
+  /**
+   * Latest activity snapshot (tail of thinking / assistant text / formatted
+   * tool call) for the panel marquee. Sticky between messages: the backend
+   * keeps sending the last non-empty snapshot so the ticker stays populated
+   * across tool-execution gaps. Undefined until the first assistant content.
+   */
+  activity?: string
 }
 
 /**
@@ -58,14 +65,18 @@ export type AgentRunResult =
       /**
        * Cause-of-death classification for log aggregation / post-hoc auditing. Optional for backward compatibility with old journals.
        * - no-structured-output: agent finished but finalize content has no StructuredOutput (neither called tools nor produced JSON in text)
+       * - invalid-structured-output: adapter returned structured output that did not match the caller-provided JSON Schema
        * - runagent-threw: runAgent threw a non-abort error (API failure / context overflow / runtime error)
        * - worktree-failed: isolation:'worktree' creation failed (fail-closed degradation)
+       * - agent-timeout: per-attempt watchdog fired and timeout retries were exhausted (CCB_AGENT_TIMEOUT_*)
        * - unknown: unclassified (compatible with old backends / third-party adapters)
        */
       reason?:
         | 'no-structured-output'
+        | 'invalid-structured-output'
         | 'runagent-threw'
         | 'worktree-failed'
+        | 'agent-timeout'
         | 'unknown'
       /** Detail (error message / text preview) for logs; not shown to end users. */
       detail?: string
@@ -112,6 +123,8 @@ export type ProgressEvent =
       phase?: string
       tokenCount: number
       toolCount: number
+      /** Latest activity snapshot for the panel marquee (see AgentProgressUpdate.activity). */
+      activity?: string
     }
   | { type: 'log'; runId: string; message: string }
   | {

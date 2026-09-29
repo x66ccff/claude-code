@@ -180,20 +180,38 @@ export async function* getTimestampedHistory(): AsyncGenerator<TimestampedHistor
 }
 
 /**
+ * Cap on lines scanned in sessionOnly mode. history.jsonl is append-only and
+ * unbounded, and the current session's entries are always the most recent
+ * lines (readLinesReverse reads newest-first), so a bounded scan window is
+ * enough. Without the cap, a session with few entries would scan the entire
+ * file on every up-arrow press.
+ */
+const SESSION_ONLY_SCAN_LIMIT = 2000
+
+/**
  * Get history entries for the current project, with current session's entries first.
  *
- * Entries from the current session are yielded before entries from other sessions,
- * so concurrent sessions don't interleave their up-arrow history. Within each group,
- * order is newest-first. Scans the same MAX_HISTORY_ITEMS window as before —
- * entries are reordered within that window, not beyond it.
+ * Default (shell completion etc.): entries from the current session are yielded
+ * before entries from other sessions, so concurrent sessions don't interleave.
+ * Within each group, order is newest-first. Scans the same MAX_HISTORY_ITEMS
+ * window as before — entries are reordered within that window, not beyond it.
+ *
+ * `sessionOnly: true` (up-arrow recall): yield ONLY the current session's
+ * entries — inputs from other sessions (same project or not) are never
+ * recalled. Resumed sessions keep their original sessionId, so a resumed
+ * session's earlier inputs still surface.
  */
-export async function* getHistory(): AsyncGenerator<HistoryEntry> {
+export async function* getHistory(
+  options: { sessionOnly?: boolean } = {},
+): AsyncGenerator<HistoryEntry> {
   const currentProject = getProjectRoot()
   const currentSession = getSessionId()
   const otherSessionEntries: LogEntry[] = []
   let yielded = 0
+  let scanned = 0
 
   for await (const entry of makeLogEntryReader()) {
+    scanned++
     // Skip malformed entries (corrupted file, old format, or invalid JSON structure)
     if (!entry || typeof entry.project !== 'string') continue
     if (entry.project !== currentProject) continue
@@ -201,13 +219,21 @@ export async function* getHistory(): AsyncGenerator<HistoryEntry> {
     if (entry.sessionId === currentSession) {
       yield await logEntryToHistoryEntry(entry)
       yielded++
+    } else if (options.sessionOnly) {
+      // Strict session isolation for up-arrow recall: never surface inputs
+      // from other sessions.
+      if (scanned >= SESSION_ONLY_SCAN_LIMIT) break
+      continue
     } else {
       otherSessionEntries.push(entry)
     }
 
     // Same MAX_HISTORY_ITEMS window as before — just reordered within it.
     if (yielded + otherSessionEntries.length >= MAX_HISTORY_ITEMS) break
+    if (options.sessionOnly && scanned >= SESSION_ONLY_SCAN_LIMIT) break
   }
+
+  if (options.sessionOnly) return
 
   for (const entry of otherSessionEntries) {
     if (yielded >= MAX_HISTORY_ITEMS) return

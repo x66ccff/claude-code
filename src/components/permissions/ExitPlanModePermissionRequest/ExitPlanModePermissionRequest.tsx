@@ -183,7 +183,18 @@ export function ExitPlanModePermissionRequest({
   // feature() must sit directly in an if/ternary (bun:bundle DCE constraint).
   const showUltraplan = feature('ULTRAPLAN') ? !ultraplanSessionUrl && !ultraplanLaunching : false;
   const usage = toolUseConfirm.assistantMessage.message.usage;
-  const { mode, isAutoModeAvailable, isBypassPermissionsModeAvailable } = toolPermissionContext;
+  const { mode, isAutoModeAvailable, isBypassPermissionsModeAvailable, prePlanMode } = toolPermissionContext;
+  // POWER_USER: exiting plan mode restores the mode saved on plan entry
+  // (prePlanMode) instead of forcing 'default'. 'plan' is nonsensical here and
+  // 'auto' is excluded because it requires autoModeActive bookkeeping that
+  // only the dedicated auto options perform. Read at render/selection time —
+  // always before the REPL applies permission updates and
+  // transitionPermissionMode() clears prePlanMode.
+  const restoredPlanMode: PermissionMode = feature('POWER_USER')
+    ? prePlanMode && prePlanMode !== 'plan' && prePlanMode !== 'auto'
+      ? prePlanMode
+      : 'default'
+    : 'default';
   const options = useMemo(
     () =>
       buildPlanApprovalOptions({
@@ -197,9 +208,18 @@ export function ExitPlanModePermissionRequest({
           : null,
         isAutoModeAvailable,
         isBypassPermissionsModeAvailable,
+        restoredPlanMode,
         onFeedbackChange: setPlanFeedback,
       }),
-    [showClearContext, showUltraplan, usage, mode, isAutoModeAvailable, isBypassPermissionsModeAvailable],
+    [
+      showClearContext,
+      showUltraplan,
+      usage,
+      mode,
+      isAutoModeAvailable,
+      isBypassPermissionsModeAvailable,
+      restoredPlanMode,
+    ],
   );
 
   function onImagePaste(
@@ -393,8 +413,10 @@ export function ExitPlanModePermissionRequest({
     }
 
     if (value !== 'no' && !isKeepContextOption) {
-      // Determine the permission mode based on the selected option
-      let mode: PermissionMode = 'default';
+      // Determine the permission mode based on the selected option.
+      // POWER_USER: plain approval restores the pre-plan mode; explicit
+      // bypass/accept-edits/auto choices below still override.
+      let mode: PermissionMode = restoredPlanMode;
       if (value === 'yes-bypass-permissions') {
         mode = 'bypassPermissions';
       } else if (value === 'yes-accept-edits') {
@@ -496,7 +518,8 @@ export function ExitPlanModePermissionRequest({
       'yes-accept-edits-keep-context': toolPermissionContext.isBypassPermissionsModeAvailable
         ? 'bypassPermissions'
         : 'acceptEdits',
-      'yes-default-keep-context': 'default',
+      // POWER_USER: restore the pre-plan mode ('default' when flag is off).
+      'yes-default-keep-context': restoredPlanMode,
       ...(feature('TRANSCRIPT_CLASSIFIER') ? { 'yes-resume-auto-mode': 'default' as const } : {}),
     };
     const keepContextMode = keepContextModes[value];
@@ -675,7 +698,9 @@ export function ExitPlanModePermissionRequest({
         setHasExitedPlanMode(true);
         setNeedsPlanModeExitAttachment(true);
         onDone();
-        toolUseConfirm.onAllow({}, [{ type: 'setMode', mode: 'default', destination: 'session' }]);
+        toolUseConfirm.onAllow({}, [
+          { type: 'setMode', mode: toExternalPermissionMode(restoredPlanMode), destination: 'session' },
+        ]);
       } else {
         logEvent('tengu_plan_exit', {
           planLengthChars: 0,
@@ -796,6 +821,7 @@ export function buildPlanApprovalOptions({
   usedPercent,
   isAutoModeAvailable,
   isBypassPermissionsModeAvailable,
+  restoredPlanMode = 'default',
   onFeedbackChange,
 }: {
   showClearContext: boolean;
@@ -803,6 +829,8 @@ export function buildPlanApprovalOptions({
   usedPercent: number | null;
   isAutoModeAvailable: boolean | undefined;
   isBypassPermissionsModeAvailable: boolean | undefined;
+  /** Mode the 'yes-default-keep-context' option restores (POWER_USER). */
+  restoredPlanMode?: PermissionMode;
   onFeedbackChange: (v: string) => void;
 }): OptionWithDescription<ResponseValue>[] {
   const options: OptionWithDescription<ResponseValue>[] = [];
@@ -845,8 +873,15 @@ export function buildPlanApprovalOptions({
     });
   }
 
+  // POWER_USER: when this option restores a non-default pre-plan mode (e.g.
+  // bypassPermissions), the "manually approve edits" label would mislead.
+  const resumeModeLabel = feature('POWER_USER')
+    ? restoredPlanMode !== 'default'
+      ? `Yes, and resume ${restoredPlanMode} mode`
+      : null
+    : null;
   options.push({
-    label: 'Yes, manually approve edits',
+    label: resumeModeLabel ?? 'Yes, manually approve edits',
     value: 'yes-default-keep-context',
   });
 

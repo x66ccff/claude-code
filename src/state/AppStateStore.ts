@@ -91,6 +91,7 @@ export type FooterItem =
 export type AppState = DeepImmutable<{
   settings: SettingsJson
   verbose: boolean
+  rawRequestViewEnabled: boolean
   mainLoopModel: ModelSetting
   mainLoopModelForSession: ModelSetting
   statusLineText: string | undefined
@@ -477,6 +478,7 @@ export function getDefaultAppState(): AppState {
     tasks: {},
     agentNameRegistry: new Map(),
     verbose: false,
+    rawRequestViewEnabled: false,
     mainLoopModel: null, // alias, full name (as with --model or env var), or null (default)
     mainLoopModelForSession: null,
     statusLineText: undefined,

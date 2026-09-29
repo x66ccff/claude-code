@@ -28,6 +28,7 @@ import { isBackgroundTask } from '../tasks/types.js';
 import { getAllInProcessTeammateTasks } from '../tasks/InProcessTeammateTask/InProcessTeammateTask.js';
 import { getEffortSuffix } from '../utils/effort.js';
 import { getMainLoopModel } from '../utils/model/model.js';
+import type { StreamingThinking } from '../utils/messages.js';
 import { getViewedTeammateTask } from '../state/selectors.js';
 import { TEARDROP_ASTERISK } from '../constants/figures.js';
 import figures from 'figures';
@@ -63,9 +64,24 @@ type Props = {
   overrideMessage?: string | null;
   spinnerSuffix?: string | null;
   verbose: boolean;
+  /** True while a compaction summary is streaming — shows a token progress bar. */
+  compactProgressActiveRef?: React.RefObject<boolean>;
   hasActiveTools?: boolean;
   /** Leader's turn has completed (no active query). Used to suppress stall-red spinner when only teammates are running. */
   leaderIsIdle?: boolean;
+  /** Live streaming thinking content — rendered as a scrolling marquee line under the spinner. */
+  streamingThinking?: StreamingThinking | null;
+  /** Live streaming compaction summary text — rendered as a marquee line under the spinner. */
+  compactStreamingText?: string | null;
+  /** Live streaming assistant output text — marquee source during 'responding'. */
+  streamingOutputText?: string | null;
+  /**
+   * Formatted last-streamed tool call (`name + partial JSON`) — marquee
+   * source during 'tool-input'/'tool-use'. Sticky: streamingToolUses is
+   * cleared at message_stop, so the caller retains the last formatted value
+   * until turn reset to keep showing which tool call is executing.
+   */
+  toolMarqueeText?: string | null;
 };
 
 // Thin wrapper: branches on isBriefOnly so the two variants have independent
@@ -105,13 +121,19 @@ function SpinnerWithVerbInner({
   pauseStartTimeRef,
   spinnerTip,
   responseLengthRef,
+  apiMetricsRef,
   overrideColor,
   overrideShimmerColor,
   overrideMessage,
   spinnerSuffix,
   verbose,
+  compactProgressActiveRef,
   hasActiveTools = false,
   leaderIsIdle = false,
+  streamingThinking = null,
+  compactStreamingText = null,
+  streamingOutputText = null,
+  toolMarqueeText = null,
 }: Props): React.ReactNode {
   const settings = useSettings();
   const reducedMotion = settings.prefersReducedMotion ?? false;
@@ -138,12 +160,14 @@ function SpinnerWithVerbInner({
   // Shows each state for minimum 2s to avoid UI jank
   const [thinkingStatus, setThinkingStatus] = useState<'thinking' | number | null>(null);
   const thinkingStartRef = useRef<number | null>(null);
+  const isCompacting = compactProgressActiveRef?.current === true;
+  const isThinking = mode === 'thinking' && !isCompacting;
 
   useEffect(() => {
     let showDurationTimer: ReturnType<typeof setTimeout> | null = null;
     let clearStatusTimer: ReturnType<typeof setTimeout> | null = null;
 
-    if (mode === 'thinking') {
+    if (isThinking) {
       // Started thinking
       if (thinkingStartRef.current === null) {
         thinkingStartRef.current = Date.now();
@@ -175,7 +199,7 @@ function SpinnerWithVerbInner({
       if (showDurationTimer) clearTimeout(showDurationTimer);
       if (clearStatusTimer) clearTimeout(clearStatusTimer);
     };
-  }, [mode]);
+  }, [isThinking]);
 
   // Find the current in-progress task and next pending task
   const currentTodo = tasksV2?.find(task => task.status !== 'pending' && task.status !== 'completed');
@@ -335,6 +359,22 @@ function SpinnerWithVerbInner({
     }
   }
 
+  // Marquee content by phase: compaction summary while compacting, live
+  // thinking text in the thinking phase, the streaming tool call during tool
+  // input/execution, otherwise the streaming assistant output text. Feeds the
+  // scrolling one-line ticker under the spinner so users can see what the
+  // model is producing (and whether it is actually making progress) across
+  // the WHOLE turn, not just while thinking.
+  const marqueeText = isCompacting
+    ? compactStreamingText
+    : mode === 'thinking' && streamingThinking?.thinking
+      ? streamingThinking.thinking
+      : mode === 'tool-input' && toolMarqueeText
+        ? toolMarqueeText
+        : mode === 'responding' && streamingOutputText
+          ? streamingOutputText
+          : null;
+
   return (
     <Box flexDirection="column" width="100%" alignItems="flex-start">
       <SpinnerAnimationRow
@@ -342,6 +382,7 @@ function SpinnerWithVerbInner({
         reducedMotion={reducedMotion}
         hasActiveTools={hasActiveTools}
         responseLengthRef={responseLengthRef}
+        apiMetricsRef={apiMetricsRef}
         message={message}
         messageColor={messageColor}
         shimmerColor={shimmerColor}
@@ -352,12 +393,14 @@ function SpinnerWithVerbInner({
         spinnerSuffix={spinnerSuffix}
         verbose={verbose}
         columns={columns}
+        compactProgressActiveRef={compactProgressActiveRef}
         hasRunningTeammates={hasRunningTeammates}
         teammateTokens={teammateTokens}
         foregroundedTeammate={foregroundedTeammate}
         leaderIsIdle={leaderIsIdle}
-        thinkingStatus={thinkingStatus}
+        thinkingStatus={isCompacting ? null : thinkingStatus}
         effortSuffix={effortSuffix}
+        marqueeText={marqueeText}
       />
       {showSpinnerTree && hasRunningTeammates ? (
         <TeammateSpinnerTree
@@ -412,7 +455,7 @@ type BriefSpinnerProps = {
 function BriefSpinner({ mode, overrideMessage }: BriefSpinnerProps): React.ReactNode {
   const settings = useSettings();
   const reducedMotion = settings.prefersReducedMotion ?? false;
-  const [randomVerb] = useState(() => sample(getSpinnerVerbs()) ?? 'Working');
+  const [randomVerb] = useState(() => sample(getSpinnerVerbs()) ?? '干活中');
   const verb = overrideMessage ?? randomVerb;
   const connStatus = useAppState(s => s.remoteConnectionStatus);
 

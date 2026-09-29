@@ -1,3 +1,4 @@
+import { feature } from 'bun:bundle';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -134,7 +135,11 @@ export function Onboarding({ onDone }: Props): React.ReactNode {
   }
 
   const steps: OnboardingStep[] = [];
-  steps.push({ id: 'theme', component: themeStep });
+  // POWER_USER skips the first-run theme picker; ThemeProvider resolves an
+  // unset theme to the dark default, so rendering is unaffected.
+  if (!feature('POWER_USER')) {
+    steps.push({ id: 'theme', component: themeStep });
+  }
 
   if (apiKeyNeedingApproval) {
     steps.push({

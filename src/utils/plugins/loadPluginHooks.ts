@@ -7,6 +7,7 @@ import {
 } from '../../bootstrap/state.js'
 import type { LoadedPlugin } from '../../types/plugin.js'
 import { logForDebugging } from '../debug.js'
+import { findBlockedMacosInjection } from '../hooks/platformHookPolicy.js'
 import { settingsChangeDetector } from '../settings/changeDetector.js'
 import {
   getSettings_DEPRECATED,
@@ -122,6 +123,20 @@ export const loadPluginHooks = memoize(async (): Promise<void> => {
 
   // Process each enabled plugin
   for (const plugin of enabled) {
+    const policyMatch = findBlockedMacosInjection({
+      name: plugin.name,
+      id: plugin.source,
+      root: plugin.path,
+      source: plugin.repository,
+    })
+    if (policyMatch) {
+      logForDebugging(
+        `Skipping plugin hooks rejected by macOS policy: ${plugin.name} (${policyMatch.field} contains "${policyMatch.keyword}")`,
+        { level: 'warn' },
+      )
+      continue
+    }
+
     if (!plugin.hooksConfig) {
       continue
     }

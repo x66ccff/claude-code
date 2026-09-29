@@ -21,6 +21,12 @@ import type { SDKAssistantMessageError } from '../../../entrypoints/agentSdkType
 import type { SystemPrompt } from '../../../utils/systemPromptType.js'
 import type { ThinkingConfig } from '../../../utils/thinking.js'
 import type { Options } from '../claude.js'
+import { shouldCaptureRawRequest } from '../rawRequestSnapshot.js'
+import {
+  isAbortError,
+  isAnthropicStreamOutput,
+  retryRateLimitStream,
+} from '../rateLimitRetry.js'
 import { recordLLMObservation } from '../../../services/langfuse/tracing.js'
 import {
   convertMessagesToLangfuse,
@@ -81,40 +87,51 @@ export async function* queryModelGemini(
     const geminiTools = anthropicToolsToGemini(standardTools)
     const toolChoice = anthropicToolChoiceToGemini(options.toolChoice)
 
-    const stream = streamGeminiGenerateContent({
-      model: geminiModel,
-      signal,
-      fetchOverride: options.fetchOverride as typeof fetch | undefined,
-      body: {
-        contents,
-        ...(systemInstruction && { systemInstruction }),
-        ...(geminiTools.length > 0 && { tools: geminiTools }),
-        ...(toolChoice && {
-          toolConfig: {
-            functionCallingConfig: toolChoice,
-          },
-        }),
-        generationConfig: {
-          ...(options.temperatureOverride !== undefined && {
-            temperature: options.temperatureOverride,
-          }),
-          ...(thinkingConfig.type !== 'disabled' && {
-            thinkingConfig: {
-              includeThoughts: true,
-              ...(thinkingConfig.type === 'enabled' && {
-                thinkingBudget: thinkingConfig.budgetTokens,
+    // Rate-limit retries replay the whole fetch+adapt pipeline, but only
+    // until real output has been emitted downstream (no-replay boundary).
+    const adaptedStream = retryRateLimitStream(
+      async () =>
+        adaptGeminiStreamToAnthropic(
+          streamGeminiGenerateContent({
+            model: geminiModel,
+            signal,
+            fetchOverride: options.fetchOverride as typeof fetch | undefined,
+            captureRawRequest: shouldCaptureRawRequest(options.querySource),
+            body: {
+              contents,
+              ...(systemInstruction && { systemInstruction }),
+              ...(geminiTools.length > 0 && { tools: geminiTools }),
+              ...(toolChoice && {
+                toolConfig: {
+                  functionCallingConfig: toolChoice,
+                },
               }),
+              generationConfig: {
+                ...(options.temperatureOverride !== undefined && {
+                  temperature: options.temperatureOverride,
+                }),
+                ...(thinkingConfig.type !== 'disabled' && {
+                  thinkingConfig: {
+                    includeThoughts: true,
+                    ...(thinkingConfig.type === 'enabled' && {
+                      thinkingBudget: thinkingConfig.budgetTokens,
+                    }),
+                  },
+                }),
+              },
             },
           }),
-        },
+          geminiModel,
+        ),
+      {
+        hasOutput: isAnthropicStreamOutput,
+        signal,
       },
-    })
+    )
 
     logForDebugging(
       `[Gemini] Calling model=${geminiModel}, messages=${contents.length}, tools=${geminiTools.length}`,
     )
-
-    const adaptedStream = adaptGeminiStreamToAnthropic(stream, geminiModel)
     const contentBlocks: Record<number, Record<string, unknown>> = {}
     const collectedMessages: AssistantMessage[] = []
     let partialMessage: BetaMessage | null = null
@@ -224,6 +241,11 @@ export async function* queryModelGemini(
           : undefined,
     })
   } catch (error) {
+    // User aborts must never surface as an "API Error" assistant message.
+    if (isAbortError(error, signal)) {
+      logForDebugging('[Gemini] Request aborted by user')
+      return
+    }
     const errorMessage = error instanceof Error ? error.message : String(error)
     logForDebugging(`[Gemini] Error: ${errorMessage}`, { level: 'error' })
     yield createAssistantAPIErrorMessage({

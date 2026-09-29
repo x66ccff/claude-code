@@ -2,7 +2,7 @@
 
 > 生成日期: 2026-06-19
 > 审计范围: src/services/acp/ 和 packages/acp-link/
-> 对照规范: /Users/konghayao/code/knowledgebase/origin/acp/agent-client-protocol (commit 取自仓库 HEAD)
+> 对照规范: <repo-root> (commit 取自仓库 HEAD)
 
 ## 概览
 

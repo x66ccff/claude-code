@@ -165,6 +165,9 @@ export function getCurrentUsage(messages: Message[]): {
     // Manual compaction keeps pre-compact messages in REPL history for
     // scrollback. Never cross the boundary and reuse their stale API usage.
     if (message && isCompactBoundaryMessage(message)) return null
+    // Split streaming blocks carry provisional usage until the response finishes.
+    if (message?.type === 'assistant' && message.message?.stop_reason === null)
+      continue
     const usage = message ? getTokenUsage(message) : undefined
     if (usage) {
       const inputTokens =
@@ -196,6 +199,8 @@ export function getPostCompactTokenEstimate(
 ): number | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]
+    if (message?.type === 'assistant' && message.message?.stop_reason === null)
+      continue
     if (message && getTokenUsage(message)) return null
     if (!message || !isCompactBoundaryMessage(message)) continue
     const estimate = message.compactMetadata.estimatedPostCompactTokens

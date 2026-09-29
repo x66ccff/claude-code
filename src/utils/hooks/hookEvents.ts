@@ -19,11 +19,21 @@ const ALWAYS_EMITTED_HOOK_EVENTS = ['SessionStart', 'Setup'] as const
 
 const MAX_PENDING_EVENTS = 100
 
+type HookEventMetadata = {
+  hookSource?: string
+  hookType?: string
+  displayInput?: string
+  startedAt?: number
+}
+
 export type HookStartedEvent = {
   type: 'started'
   hookId: string
   hookName: string
   hookEvent: string
+  hookSource?: string
+  hookType?: string
+  displayInput?: string
 }
 
 export type HookProgressEvent = {
@@ -31,6 +41,9 @@ export type HookProgressEvent = {
   hookId: string
   hookName: string
   hookEvent: string
+  hookSource?: string
+  hookType?: string
+  displayInput?: string
   stdout: string
   stderr: string
   output: string
@@ -41,11 +54,15 @@ export type HookResponseEvent = {
   hookId: string
   hookName: string
   hookEvent: string
+  hookSource?: string
+  hookType?: string
+  displayInput?: string
+  durationMs?: number
   output: string
   stdout: string
   stderr: string
   exitCode?: number
-  outcome: 'success' | 'error' | 'cancelled'
+  outcome: 'success' | 'error' | 'cancelled' | 'rejected'
 }
 
 export type HookExecutionEvent =
@@ -55,6 +72,7 @@ export type HookExecutionEvent =
 export type HookEventHandler = (event: HookExecutionEvent) => void
 
 const pendingEvents: HookExecutionEvent[] = []
+const hookMetadata = new Map<string, HookEventMetadata>()
 let eventHandler: HookEventHandler | null = null
 let allHookEventsEnabled = false
 
@@ -94,14 +112,19 @@ export function emitHookStarted(
   hookId: string,
   hookName: string,
   hookEvent: string,
+  metadata: Omit<HookEventMetadata, 'startedAt'> = {},
 ): void {
   if (!shouldEmit(hookEvent)) return
 
+  hookMetadata.set(hookId, { ...metadata, startedAt: Date.now() })
   emit({
     type: 'started',
     hookId,
     hookName,
     hookEvent,
+    hookSource: metadata.hookSource,
+    hookType: metadata.hookType,
+    displayInput: metadata.displayInput,
   })
 }
 
@@ -115,9 +138,13 @@ export function emitHookProgress(data: {
 }): void {
   if (!shouldEmit(data.hookEvent)) return
 
+  const metadata = hookMetadata.get(data.hookId)
   emit({
     type: 'progress',
     ...data,
+    hookSource: metadata?.hookSource,
+    hookType: metadata?.hookType,
+    displayInput: metadata?.displayInput,
   })
 }
 
@@ -158,7 +185,7 @@ export function emitHookResponse(data: {
   stdout: string
   stderr: string
   exitCode?: number
-  outcome: 'success' | 'error' | 'cancelled'
+  outcome: 'success' | 'error' | 'cancelled' | 'rejected'
 }): void {
   // Always log full hook output to debug log for verbose mode debugging
   const outputToLog = data.stdout || data.stderr || data.output
@@ -168,11 +195,20 @@ export function emitHookResponse(data: {
     )
   }
 
+  const metadata = hookMetadata.get(data.hookId)
+  hookMetadata.delete(data.hookId)
   if (!shouldEmit(data.hookEvent)) return
 
   emit({
     type: 'response',
     ...data,
+    hookSource: metadata?.hookSource,
+    hookType: metadata?.hookType,
+    displayInput: metadata?.displayInput,
+    durationMs:
+      metadata?.startedAt === undefined
+        ? undefined
+        : Date.now() - metadata.startedAt,
   })
 }
 
@@ -188,5 +224,6 @@ export function setAllHookEventsEnabled(enabled: boolean): void {
 export function clearHookEventState(): void {
   eventHandler = null
   pendingEvents.length = 0
+  hookMetadata.clear()
   allHookEventsEnabled = false
 }

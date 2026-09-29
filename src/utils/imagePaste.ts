@@ -1,6 +1,7 @@
 import { feature } from 'bun:bundle'
 import { randomBytes } from 'crypto'
 import { execa } from 'execa'
+import { accessSync, constants as fsConstants, mkdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { basename, extname, isAbsolute, join } from 'path'
 import {
@@ -29,15 +30,52 @@ type SupportedPlatform = 'darwin' | 'linux' | 'win32'
 
 // Threshold in characters for when to consider text a "large paste"
 export const PASTE_THRESHOLD = 800
+
+/**
+ * Validate a configured temp dir (CLAUDE_CODE_TMPDIR) for clipboard image
+ * saves, falling back to the platform default when unusable.
+ *
+ * The save step below shells out to osascript/xclip, which can create the
+ * temp FILE but not missing parent DIRECTORIES. A stale CLAUDE_CODE_TMPDIR
+ * (e.g. a Linux path baked into a distributed settings.json, deployed on
+ * macOS where /mnt/workspace doesn't exist) therefore breaks clipboard
+ * image paste SILENTLY: checkImage succeeds — so the "Image in clipboard ·
+ * ctrl+v to paste" hint still fires — but saveImage exits non-zero and
+ * getImageFromClipboard() returns null. Create the dir up front and verify
+ * writability; on any failure fall back to the always-available default.
+ */
+function resolveWritableTmpDir(
+  configured: string | undefined,
+  defaultDir: string,
+): string {
+  if (!configured) {
+    return defaultDir
+  }
+  try {
+    mkdirSync(configured, { recursive: true })
+    accessSync(configured, fsConstants.W_OK)
+    return configured
+  } catch {
+    logForDebugging(
+      `CLAUDE_CODE_TMPDIR not usable (${configured}), falling back to ${defaultDir}`,
+      { level: 'warn' },
+    )
+    return defaultDir
+  }
+}
+
 function getClipboardCommands() {
   const platform = process.platform as SupportedPlatform
 
   // Platform-specific temporary file paths
   // Use CLAUDE_CODE_TMPDIR if set, otherwise fall back to platform defaults.
   // tmpdir() honors $TMPDIR so non-/tmp environments (Termux/Android, containers) work out of the box.
-  const baseTmpDir =
-    process.env.CLAUDE_CODE_TMPDIR ||
-    (platform === 'win32' ? process.env.TEMP || 'C:\\Temp' : tmpdir())
+  const defaultTmpDir =
+    platform === 'win32' ? process.env.TEMP || 'C:\\Temp' : tmpdir()
+  const baseTmpDir = resolveWritableTmpDir(
+    process.env.CLAUDE_CODE_TMPDIR,
+    defaultTmpDir,
+  )
   const screenshotFilename = 'claude_cli_latest_screenshot.png'
   const tempPaths: Record<SupportedPlatform, string> = {
     darwin: join(baseTmpDir, screenshotFilename),
@@ -200,6 +238,9 @@ export async function getImageFromClipboard(): Promise<ImageWithDimensions | nul
       reject: false,
     })
     if (checkResult.exitCode !== 0) {
+      logForDebugging(
+        `Clipboard image check failed (exit ${checkResult.exitCode})`,
+      )
       return null
     }
 
@@ -209,6 +250,10 @@ export async function getImageFromClipboard(): Promise<ImageWithDimensions | nul
       reject: false,
     })
     if (saveResult.exitCode !== 0) {
+      logForDebugging(
+        `Clipboard image save to ${screenshotPath} failed (exit ${saveResult.exitCode}): ${String(saveResult.stderr).slice(0, 300)}`,
+        { level: 'warn' },
+      )
       return null
     }
 
@@ -245,7 +290,10 @@ export async function getImageFromClipboard(): Promise<ImageWithDimensions | nul
       mediaType,
       dimensions: resized.dimensions,
     }
-  } catch {
+  } catch (e) {
+    logForDebugging(`Clipboard image read failed: ${String(e)}`, {
+      level: 'warn',
+    })
     return null
   }
 }

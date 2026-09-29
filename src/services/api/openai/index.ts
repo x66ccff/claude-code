@@ -13,8 +13,14 @@ import type {
 } from '../../../types/message.js'
 import type { AgentId } from '../../../types/ids.js'
 import type { Tools } from '../../../Tool.js'
+import { getSessionId } from '../../../bootstrap/state.js'
+import { shouldCaptureRawRequest } from '../rawRequestSnapshot.js'
 import { getOpenAIClient } from './client.js'
-import { updateOpenAIUsage } from './openaiShared.js'
+import {
+  formatOpenAIPromptCacheKey,
+  getOfficialOpenAIPromptCacheKey,
+  updateOpenAIUsage,
+} from './openaiShared.js'
 import {
   anthropicMessagesToOpenAI,
   resolveOpenAIModel,
@@ -38,6 +44,11 @@ import {
 import { logForDebugging } from '../../../utils/debug.js'
 import { addToTotalSessionCost } from '../../../cost-tracker.js'
 import { calculateUSDCost } from '../../../utils/modelCost.js'
+import {
+  isAbortError,
+  isAnthropicStreamOutput,
+  retryRateLimitStream,
+} from '../rateLimitRetry.js'
 import {
   isOpenAIThinkingEnabled,
   resolveOpenAIMaxTokens,
@@ -86,7 +97,8 @@ function convertToResponsesReasoningEffort(
   if (effortValue === 'low') return 'low'
   if (effortValue === 'medium') return 'medium'
   if (effortValue === 'high') return 'high'
-  if (effortValue === 'xhigh' || effortValue === 'max') return 'xhigh'
+  if (effortValue === 'xhigh') return 'xhigh'
+  if (effortValue === 'max') return 'max'
   if (typeof effortValue === 'number') return 'high'
   return undefined
 }
@@ -364,48 +376,73 @@ export async function* queryModelOpenAI(
       options.maxOutputTokensOverride,
     )
 
+    const useChatGPTResponses = isChatGPTAuthEnabled()
+    // OpenAI's official OAuth and API-key routes share the same prompt-cache
+    // contract. Scope the key to the real conversation so resumed turns stay
+    // sticky while unrelated sessions do not share a routing bucket. Generic
+    // compatible endpoints intentionally receive no OpenAI-specific fields.
+    const sessionId = getSessionId()
+    const sessionPromptCacheKey = formatOpenAIPromptCacheKey(sessionId)
+    const promptCacheKey = useChatGPTResponses
+      ? sessionPromptCacheKey
+      : getOfficialOpenAIPromptCacheKey(process.env.OPENAI_BASE_URL, sessionId)
+    const useOfficialOpenAICache = promptCacheKey !== undefined
+
     logForDebugging(
       `[OpenAI] Calling model=${openaiModel}, messages=${openaiMessages.length}, tools=${openaiTools.length}, thinking=${enableThinking}, effort=${compatibleReasoningEffort ?? 'default'}`,
     )
 
     // 11. Call OpenAI API with streaming. ChatGPT subscription auth uses the
     // Codex Responses backend; API-key/OpenAI-compatible auth keeps the
-    // existing Chat Completions adapter.
-    const adaptedStream = isChatGPTAuthEnabled()
-      ? adaptResponsesStreamToAnthropic(
-          await createChatGPTResponsesStream({
-            request: buildResponsesRequest({
-              model: openaiModel,
-              messages: openaiMessages,
-              tools: openaiTools,
-              toolChoice: openaiToolChoice,
-              reasoningEffort: chatGPTReasoningEffort,
-            }),
-            signal,
-            fetchOverride: options.fetchOverride as unknown as typeof fetch,
-          }),
-          openaiModel,
-        )
-      : adaptOpenAIStreamToAnthropic(
-          await getOpenAIClient({
-            maxRetries: 0,
-            fetchOverride: options.fetchOverride as unknown as typeof fetch,
-            source: options.querySource,
-          }).chat.completions.create(
-            buildOpenAIRequestBody({
-              model: openaiModel,
-              messages: openaiMessages,
-              tools: openaiTools,
-              toolChoice: openaiToolChoice,
-              enableThinking,
-              reasoningEffort: compatibleReasoningEffort,
-              maxTokens,
-              temperatureOverride: options.temperatureOverride,
-            }),
-            { signal },
-          ),
-          openaiModel,
-        )
+    // existing Chat Completions adapter. The whole create+adapt pipeline is
+    // re-run per rate-limit retry attempt; replay stops once real output has
+    // been emitted downstream.
+    const adaptedStream = retryRateLimitStream(
+      async () =>
+        useChatGPTResponses
+          ? adaptResponsesStreamToAnthropic(
+              await createChatGPTResponsesStream({
+                request: buildResponsesRequest({
+                  model: openaiModel,
+                  messages: openaiMessages,
+                  tools: openaiTools,
+                  toolChoice: openaiToolChoice,
+                  reasoningEffort: chatGPTReasoningEffort,
+                  promptCacheKey: sessionPromptCacheKey,
+                }),
+                signal,
+                fetchOverride: options.fetchOverride as unknown as typeof fetch,
+                captureRawRequest: shouldCaptureRawRequest(options.querySource),
+              }),
+              openaiModel,
+            )
+          : adaptOpenAIStreamToAnthropic(
+              await getOpenAIClient({
+                fetchOverride: options.fetchOverride as unknown as typeof fetch,
+                source: options.querySource,
+                captureRawRequest: shouldCaptureRawRequest(options.querySource),
+              }).chat.completions.create(
+                buildOpenAIRequestBody({
+                  model: openaiModel,
+                  messages: openaiMessages,
+                  tools: openaiTools,
+                  toolChoice: openaiToolChoice,
+                  enableThinking,
+                  reasoningEffort: compatibleReasoningEffort,
+                  maxTokens,
+                  temperatureOverride: options.temperatureOverride,
+                  promptCacheKey,
+                }),
+                { signal },
+              ),
+              openaiModel,
+              { includeCacheWriteTokens: useOfficialOpenAICache },
+            ),
+      {
+        hasOutput: isAnthropicStreamOutput,
+        signal,
+      },
+    )
 
     // 12. Convert OpenAI stream to Anthropic events, then process into
     //     AssistantMessage + StreamEvent (matching the Anthropic path behavior)
@@ -566,6 +603,13 @@ export async function* queryModelOpenAI(
       }
     }
   } catch (error) {
+    // User aborts must never surface as an "API Error" assistant message —
+    // the interruption is handled upstream (same semantics as the Anthropic
+    // path, which returns silently on APIUserAbortError).
+    if (isAbortError(error, signal)) {
+      logForDebugging('[OpenAI] Request aborted by user')
+      return
+    }
     const errorMessage = error instanceof Error ? error.message : String(error)
     logForDebugging(`[OpenAI] Error: ${errorMessage}`, { level: 'error' })
     yield createAssistantAPIErrorMessage({

@@ -15,6 +15,7 @@ type SessionStartHooksOptions = {
   agentType?: string
   model?: string
   forceSyncExecution?: boolean
+  signal?: AbortSignal
 }
 
 // Set by processSessionStartHooks when a hook emits initialUserMessage;
@@ -39,6 +40,7 @@ export async function processSessionStartHooks(
     agentType,
     model,
     forceSyncExecution,
+    signal,
   }: SessionStartHooksOptions = {},
 ): Promise<HookResultMessage[]> {
   // --bare skips all hooks. executeHooks already early-returns under --bare
@@ -134,7 +136,7 @@ export async function processSessionStartHooks(
     sessionId,
     resolvedAgentType,
     model,
-    undefined,
+    signal,
     undefined,
     forceSyncExecution,
   )) {

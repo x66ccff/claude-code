@@ -163,8 +163,7 @@ export async function checkForAsyncHookResponses(): Promise<
         logForDebugging(
           `Hooks: Hook ${hook.processId} is ${hook.shellCommand.status}, removing from registry`,
         )
-        hook.stopProgressInterval()
-        hook.shellCommand.cleanup()
+        await finalizeHook(hook, 1, 'cancelled')
         return { type: 'remove' as const, processId: hook.processId }
       }
 

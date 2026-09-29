@@ -16,6 +16,10 @@ import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from 
 import { getAPIMetadata } from '../services/api/claude.js'
 import { getAnthropicClient } from '../services/api/client.js'
 import {
+  RateLimitError,
+  retryRateLimit,
+} from '../services/api/rateLimitRetry.js'
+import {
   createTrace,
   createChildSpan,
   endTrace,
@@ -30,11 +34,20 @@ import {
 import { getModelBetas, modelSupportsStructuredOutputs } from './betas.js'
 import { logForDebugging } from './debug.js'
 import { errorMessage } from './errors.js'
-import { computeFingerprint } from './fingerprint.js'
 import { getAPIProvider } from './model/providers.js'
 import { normalizeModelStringForAPI } from './model/model.js'
 import { getOpenAIClient } from '../services/api/openai/client.js'
 import { getGrokClient } from '../services/api/grok/client.js'
+import { isChatGPTAuthEnabled } from '../services/api/openai/chatgptAuth.js'
+import {
+  adaptResponsesStreamToAnthropic,
+  buildResponsesRequest,
+  createChatGPTResponsesStream,
+} from '../services/api/openai/responsesAdapter.js'
+import {
+  formatOpenAIPromptCacheKey,
+  getOfficialOpenAIPromptCacheKey,
+} from '../services/api/openai/openaiShared.js'
 import {
   anthropicMessagesToOpenAI,
   resolveOpenAIModel,
@@ -44,8 +57,10 @@ import {
   resolveGeminiModel,
   anthropicToolsToGemini,
   anthropicToolChoiceToGemini,
+  normalizeOpenAIUsage,
 } from '@ant/model-provider'
 import type { SystemPrompt } from './systemPromptType.js'
+import type { BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 
 type MessageParam = Anthropic.MessageParam
 type TextBlockParam = Anthropic.TextBlockParam
@@ -76,7 +91,8 @@ export type SideQueryOptions = {
   output_format?: BetaJSONOutputFormat
   /** Max tokens (default: 1024) */
   max_tokens?: number
-  /** Max retries (default: 2) */
+  /** Ignored for retries: SDK retries are disabled; rate limits use the
+   *  unified linear-backoff policy (rateLimitRetry.ts). */
   maxRetries?: number
   /** Abort signal */
   signal?: AbortSignal
@@ -95,21 +111,6 @@ export type SideQueryOptions = {
   /** When true, API failures are recorded as WARNING instead of ERROR in Langfuse.
    *  Use for optional/best-effort queries where failure is expected and handled gracefully. */
   optional?: boolean
-}
-
-/**
- * Extract text from first user message for fingerprint computation.
- */
-function extractFirstUserMessageText(messages: MessageParam[]): string {
-  const firstUserMessage = messages.find(m => m.role === 'user')
-  if (!firstUserMessage) return ''
-
-  const content = firstUserMessage.content
-  if (typeof content === 'string') return content
-
-  // Array of content blocks - find first text block
-  const textBlock = content.find(block => block.type === 'text')
-  return textBlock?.type === 'text' ? textBlock.text : ''
 }
 
 /**
@@ -188,7 +189,6 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
     tool_choice,
     output_format,
     max_tokens = 1024,
-    maxRetries = 2,
     signal,
     skipSystemPromptPrefix,
     temperature,
@@ -205,7 +205,8 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
   }
 
   const client = await getAnthropicClient({
-    maxRetries,
+    // SDK retries disabled: the unified rate-limit policy owns the budget.
+    maxRetries: 0,
     model,
     source: 'side_query',
   })
@@ -219,12 +220,7 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
     betas.push(STRUCTURED_OUTPUTS_BETA_HEADER)
   }
 
-  // Extract first user message text for fingerprint
-  const messageText = extractFirstUserMessageText(messages)
-
-  // Compute fingerprint for OAuth attribution
-  const fingerprint = computeFingerprint(messageText, MACRO.VERSION)
-  const attributionHeader = getAttributionHeader(fingerprint)
+  const attributionHeader = getAttributionHeader()
 
   // Build system as array to keep attribution header in its own block
   // (prevents server-side parsing from including system content in cc_entrypoint)
@@ -297,21 +293,27 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
 
   let response: BetaMessage
   try {
-    response = await client.beta.messages.create(
-      {
-        model: normalizedModel,
-        max_tokens,
-        system: systemBlocks,
-        messages,
-        ...(tools && { tools }),
-        ...(tool_choice && { tool_choice }),
-        ...(output_format && { output_config: { format: output_format } }),
-        ...(temperature !== undefined && { temperature }),
-        ...(stop_sequences && { stop_sequences }),
-        ...(thinkingConfig && { thinking: thinkingConfig }),
-        ...(betas.length > 0 && { betas }),
-        metadata: getAPIMetadata(),
-      },
+    // Side queries expose nothing until complete, so the whole request is
+    // safely replayable under the unified rate-limit policy.
+    response = await retryRateLimit(
+      () =>
+        client.beta.messages.create(
+          {
+            model: normalizedModel,
+            max_tokens,
+            system: systemBlocks,
+            messages,
+            ...(tools && { tools }),
+            ...(tool_choice && { tool_choice }),
+            ...(output_format && { output_config: { format: output_format } }),
+            ...(temperature !== undefined && { temperature }),
+            ...(stop_sequences && { stop_sequences }),
+            ...(thinkingConfig && { thinking: thinkingConfig }),
+            ...(betas.length > 0 && { betas }),
+            metadata: getAPIMetadata(),
+          },
+          { signal },
+        ),
       { signal },
     )
   } catch (error) {
@@ -391,12 +393,254 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
 }
 
 /**
+ * Collect Anthropic stream events from the ChatGPT Responses adapter into a
+ * single BetaMessage for side-query callers (classifiers, explainers, etc.).
+ */
+async function collectAnthropicStreamToBetaMessage(
+  stream: AsyncIterable<BetaRawMessageStreamEvent>,
+  fallbackModel: string,
+): Promise<BetaMessage> {
+  let messageId = `msg_side_${Date.now()}`
+  let model = fallbackModel
+  let stopReason: BetaMessage['stop_reason'] = 'end_turn'
+  let usage = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  }
+  const contentBlocks: Record<number, Record<string, unknown>> = {}
+
+  for await (const event of stream) {
+    switch (event.type) {
+      case 'message_start': {
+        messageId = event.message.id
+        model = event.message.model || model
+        if (event.message.usage) {
+          usage = {
+            input_tokens: event.message.usage.input_tokens ?? 0,
+            output_tokens: event.message.usage.output_tokens ?? 0,
+            cache_creation_input_tokens:
+              event.message.usage.cache_creation_input_tokens ?? 0,
+            cache_read_input_tokens:
+              event.message.usage.cache_read_input_tokens ?? 0,
+          }
+        }
+        break
+      }
+      case 'content_block_start': {
+        const cb = event.content_block as unknown as Record<string, unknown>
+        if (cb.type === 'tool_use') {
+          contentBlocks[event.index] = { ...cb, input: '' }
+        } else if (cb.type === 'text') {
+          contentBlocks[event.index] = { ...cb, text: '' }
+        } else if (cb.type === 'thinking') {
+          contentBlocks[event.index] = {
+            ...cb,
+            thinking: '',
+            signature: '',
+          }
+        } else {
+          contentBlocks[event.index] = { ...cb }
+        }
+        break
+      }
+      case 'content_block_delta': {
+        const block = contentBlocks[event.index]
+        if (!block) break
+        const delta = event.delta as {
+          type: string
+          text?: string
+          partial_json?: string
+          thinking?: string
+          signature?: string
+        }
+        if (delta.type === 'text_delta') {
+          block.text = String(block.text ?? '') + String(delta.text ?? '')
+        } else if (delta.type === 'input_json_delta') {
+          block.input =
+            String(block.input ?? '') + String(delta.partial_json ?? '')
+        } else if (delta.type === 'thinking_delta') {
+          block.thinking =
+            String(block.thinking ?? '') + String(delta.thinking ?? '')
+        } else if (delta.type === 'signature_delta') {
+          block.signature = delta.signature
+        }
+        break
+      }
+      case 'message_delta': {
+        const delta = event.delta as {
+          stop_reason?: BetaMessage['stop_reason']
+        }
+        if (delta.stop_reason != null) {
+          stopReason = delta.stop_reason
+        }
+        const deltaUsage = (
+          event as {
+            usage?: {
+              input_tokens?: number
+              output_tokens?: number
+              cache_creation_input_tokens?: number
+              cache_read_input_tokens?: number
+            }
+          }
+        ).usage
+        if (deltaUsage) {
+          if (typeof deltaUsage.input_tokens === 'number') {
+            usage.input_tokens = deltaUsage.input_tokens
+          }
+          if (typeof deltaUsage.output_tokens === 'number') {
+            usage.output_tokens = deltaUsage.output_tokens
+          }
+          if (
+            typeof deltaUsage.cache_creation_input_tokens === 'number' &&
+            deltaUsage.cache_creation_input_tokens > 0
+          ) {
+            usage.cache_creation_input_tokens =
+              deltaUsage.cache_creation_input_tokens
+          }
+          if (
+            typeof deltaUsage.cache_read_input_tokens === 'number' &&
+            deltaUsage.cache_read_input_tokens > 0
+          ) {
+            usage.cache_read_input_tokens = deltaUsage.cache_read_input_tokens
+          }
+        }
+        break
+      }
+      default:
+        break
+    }
+  }
+
+  const content = Object.keys(contentBlocks)
+    .map(Number)
+    .sort((a, b) => a - b)
+    .map(index => {
+      const block = contentBlocks[index]!
+      if (block.type === 'tool_use') {
+        const rawInput = block.input
+        let parsed: unknown = {}
+        if (typeof rawInput === 'string' && rawInput.length > 0) {
+          try {
+            parsed = JSON.parse(rawInput)
+          } catch {
+            parsed = {}
+          }
+        } else if (rawInput && typeof rawInput === 'object') {
+          parsed = rawInput
+        }
+        return {
+          type: 'tool_use' as const,
+          id: String(block.id ?? `toolu_${index}`),
+          name: String(block.name ?? ''),
+          input: parsed,
+        }
+      }
+      if (block.type === 'thinking') {
+        return {
+          type: 'thinking' as const,
+          thinking: String(block.thinking ?? ''),
+          signature: String(block.signature ?? ''),
+        }
+      }
+      return {
+        type: 'text' as const,
+        text: String(block.text ?? ''),
+      }
+    })
+
+  // Forced tool_choice classifiers care about tool_use blocks, not stop_reason
+  // from the Responses adapter (which often reports end_turn even with tools).
+  if (content.some(b => b.type === 'tool_use') && stopReason === 'end_turn') {
+    stopReason = 'tool_use'
+  }
+
+  return {
+    id: messageId,
+    type: 'message',
+    role: 'assistant',
+    content: content as BetaMessage['content'],
+    model,
+    stop_reason: stopReason,
+    stop_sequence: null,
+    usage,
+  } as BetaMessage
+}
+
+/**
+ * ChatGPT OAuth side query via the Codex Responses API.
+ *
+ * Must not use getOpenAIClient() — that path only reads OPENAI_API_KEY and
+ * yields 401 under OPENAI_AUTH_MODE=chatgpt (no API key configured).
+ */
+async function sideQueryViaChatGPTResponses(
+  opts: SideQueryOptions,
+  openaiModel: string,
+  openaiMessages: Array<{
+    role: 'system' | 'user' | 'assistant'
+    content: string
+  }>,
+  openaiTools: unknown[] | undefined,
+  openaiToolChoice: unknown,
+): Promise<BetaMessage> {
+  const start = Date.now()
+  const request = buildResponsesRequest({
+    model: openaiModel,
+    messages: openaiMessages,
+    tools: openaiTools ?? [],
+    toolChoice: openaiToolChoice,
+    promptCacheKey: formatOpenAIPromptCacheKey(getSessionId()),
+  })
+
+  const signal = opts.signal ?? new AbortController().signal
+  // Side queries expose nothing until collection completes, so the whole
+  // stream is safely replayable under the unified rate-limit policy.
+  const betaMessage = await retryRateLimit(
+    async () => {
+      const rawStream = await createChatGPTResponsesStream({
+        request,
+        signal,
+      })
+      const adapted = adaptResponsesStreamToAnthropic(rawStream, openaiModel)
+      return collectAnthropicStreamToBetaMessage(adapted, openaiModel)
+    },
+    { signal },
+  )
+
+  const now = Date.now()
+  const lastCompletion = getLastApiCompletionTimestamp()
+  logEvent('tengu_api_success', {
+    requestId:
+      betaMessage.id as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+    querySource:
+      opts.querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+    model:
+      openaiModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+    inputTokens: betaMessage.usage.input_tokens,
+    outputTokens: betaMessage.usage.output_tokens,
+    cachedInputTokens: betaMessage.usage.cache_read_input_tokens ?? 0,
+    uncachedInputTokens: betaMessage.usage.input_tokens,
+    durationMsIncludingRetries: now - start,
+    timeSinceLastApiCallMs:
+      lastCompletion !== null ? now - lastCompletion : undefined,
+  })
+  setLastApiCompletionTimestamp(now)
+
+  return betaMessage
+}
+
+/**
  * OpenAI-compatible side query for OpenAI and Grok providers.
  * Both use the OpenAI SDK with different base URLs.
  *
  * Converts Anthropic-format params to OpenAI Chat Completions, sends a
  * non-streaming request, and wraps the response back into a BetaMessage
  * shape so callers remain provider-agnostic.
+ *
+ * When OPENAI_AUTH_MODE=chatgpt, OpenAI side queries use the ChatGPT OAuth
+ * Responses API path (same auth/transport as the main loop) instead of the
+ * API-key Chat Completions client.
  *
  * Supports tools and tool_choice for structured output (e.g. yoloClassifier,
  * permissionExplainer).
@@ -418,17 +662,11 @@ async function sideQueryViaOpenAICompatible(
   const provider = getAPIProvider()
   const normalizedModel = normalizeModelStringForAPI(model)
 
-  // Resolve model name and client per provider
-  let openaiModel: string
-  // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
-  let client: import('openai').default
-  if (provider === 'grok') {
-    openaiModel = resolveGrokModel(normalizedModel)
-    client = getGrokClient({ maxRetries: opts.maxRetries ?? 2 })
-  } else {
-    openaiModel = resolveOpenAIModel(normalizedModel)
-    client = getOpenAIClient({ maxRetries: opts.maxRetries ?? 2 })
-  }
+  // Resolve model name per provider
+  const openaiModel =
+    provider === 'grok'
+      ? resolveGrokModel(normalizedModel)
+      : resolveOpenAIModel(normalizedModel)
 
   // Build system prompt text
   const systemText = extractSystemText(system)
@@ -452,6 +690,22 @@ async function sideQueryViaOpenAICompatible(
     ? anthropicToolChoiceToOpenAI(tool_choice)
     : undefined
 
+  // ChatGPT subscription auth: use Responses API + OAuth, never empty API key.
+  if (provider === 'openai' && isChatGPTAuthEnabled()) {
+    return sideQueryViaChatGPTResponses(
+      opts,
+      openaiModel,
+      openaiMessages,
+      openaiTools,
+      openaiToolChoice,
+    )
+  }
+
+  // API-key / OpenAI-compatible / Grok: Chat Completions
+  // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
+  const client: import('openai').default =
+    provider === 'grok' ? getGrokClient() : getOpenAIClient()
+
   const start = Date.now()
 
   const requestParams: Record<string, unknown> = {
@@ -459,14 +713,26 @@ async function sideQueryViaOpenAICompatible(
     messages: openaiMessages,
     max_tokens,
   }
+  const promptCacheKey =
+    provider === 'openai'
+      ? getOfficialOpenAIPromptCacheKey(
+          process.env.OPENAI_BASE_URL,
+          getSessionId(),
+        )
+      : undefined
+  if (promptCacheKey) requestParams.prompt_cache_key = promptCacheKey
   if (temperature !== undefined) requestParams.temperature = temperature
   if (openaiTools && openaiTools.length > 0) {
     requestParams.tools = openaiTools
     if (openaiToolChoice) requestParams.tool_choice = openaiToolChoice
   }
 
-  const response = await client.chat.completions.create(
-    requestParams as unknown as import('openai/resources/chat/completions/completions.mjs').ChatCompletionCreateParamsNonStreaming,
+  const response = await retryRateLimit(
+    () =>
+      client.chat.completions.create(
+        requestParams as unknown as import('openai/resources/chat/completions/completions.mjs').ChatCompletionCreateParamsNonStreaming,
+        { signal },
+      ),
     { signal },
   )
 
@@ -499,6 +765,26 @@ async function sideQueryViaOpenAICompatible(
     }
   }
 
+  const responseUsage = response.usage
+  const usageRecord = responseUsage as unknown as
+    | Record<string, unknown>
+    | undefined
+  const detailsValue = usageRecord?.prompt_tokens_details
+  const details =
+    detailsValue && typeof detailsValue === 'object'
+      ? (detailsValue as Record<string, unknown>)
+      : undefined
+  const usage = normalizeOpenAIUsage({
+    totalInputTokens: responseUsage?.prompt_tokens ?? 0,
+    outputTokens: responseUsage?.completion_tokens ?? 0,
+    cacheReadTokens:
+      typeof details?.cached_tokens === 'number' ? details.cached_tokens : 0,
+    cacheWriteTokens:
+      promptCacheKey && typeof details?.cache_write_tokens === 'number'
+        ? details.cache_write_tokens
+        : 0,
+  })
+
   const now = Date.now()
   const requestId = response.id
   const lastCompletion = getLastApiCompletionTimestamp()
@@ -509,10 +795,10 @@ async function sideQueryViaOpenAICompatible(
       opts.querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     model:
       openaiModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-    inputTokens: response.usage?.prompt_tokens ?? 0,
-    outputTokens: response.usage?.completion_tokens ?? 0,
-    cachedInputTokens: 0,
-    uncachedInputTokens: response.usage?.prompt_tokens ?? 0,
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cachedInputTokens: usage.cache_read_input_tokens,
+    uncachedInputTokens: usage.cache_creation_input_tokens,
     durationMsIncludingRetries: now - start,
     timeSinceLastApiCallMs:
       lastCompletion !== null ? now - lastCompletion : undefined,
@@ -534,10 +820,7 @@ async function sideQueryViaOpenAICompatible(
     model: openaiModel,
     stop_reason: stopReason as BetaMessage['stop_reason'],
     stop_sequence: null,
-    usage: {
-      input_tokens: response.usage?.prompt_tokens ?? 0,
-      output_tokens: response.usage?.completion_tokens ?? 0,
-    },
+    usage,
   } as BetaMessage
 }
 
@@ -638,41 +921,49 @@ async function sideQueryViaGemini(
 
   const start = Date.now()
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': process.env.GEMINI_API_KEY || '',
-    },
-    body: JSON.stringify(body),
-    signal,
-  })
+  const geminiResponse = await retryRateLimit(
+    async () => {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': process.env.GEMINI_API_KEY || '',
+        },
+        body: JSON.stringify(body),
+        signal,
+      })
 
-  if (!res.ok) {
-    const errorBody = await res.text()
-    throw new Error(
-      `Gemini API request failed (${res.status} ${res.statusText}): ${errorBody || 'empty response body'}`,
-    )
-  }
-
-  const geminiResponse = (await res.json()) as {
-    candidates?: Array<{
-      content?: {
-        role?: string
-        parts?: Array<{
-          text?: string
-          functionCall?: { name?: string; args?: Record<string, unknown> }
-        }>
+      if (!res.ok) {
+        const errorBody = await res.text()
+        // Structured error so 429/RESOURCE_EXHAUSTED are recognized by the
+        // unified rate-limit policy.
+        throw new RateLimitError(
+          `Gemini API request failed (${res.status} ${res.statusText}): ${errorBody || 'empty response body'}`,
+          { status: res.status },
+        )
       }
-      finishReason?: string
-    }>
-    usageMetadata?: {
-      promptTokenCount?: number
-      candidatesTokenCount?: number
-      totalTokenCount?: number
-    }
-    id?: string
-  }
+
+      return (await res.json()) as {
+        candidates?: Array<{
+          content?: {
+            role?: string
+            parts?: Array<{
+              text?: string
+              functionCall?: { name?: string; args?: Record<string, unknown> }
+            }>
+          }
+          finishReason?: string
+        }>
+        usageMetadata?: {
+          promptTokenCount?: number
+          candidatesTokenCount?: number
+          totalTokenCount?: number
+        }
+        id?: string
+      }
+    },
+    { signal },
+  )
 
   // Build content blocks from Gemini response
   const contentBlocks: Array<
