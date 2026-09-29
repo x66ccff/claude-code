@@ -294,10 +294,10 @@ describe('formatLogMetadata', () => {
       modified,
       messageCount: 3,
       gitBranch: 'main',
-      hostname: 'dsw-883935-74b9658444-624v7',
+      hostname: 'dsw-example-worker',
     })
-    expect(result).toContain('dsw-883935-74b9658444-624v7')
-    expect(result.endsWith('dsw-883935-74b9658444-624v7')).toBe(true)
+    expect(result).toContain('dsw-example-worker')
+    expect(result.endsWith('dsw-example-worker')).toBe(true)
   })
 
   test('omits hostname segment when absent (pre-feature sessions)', () => {

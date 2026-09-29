@@ -42,7 +42,7 @@ afterEach(() => {
 
 describe('isRecordableSessionHostname', () => {
   test('accepts dsw-prefixed PAI hostnames', () => {
-    expect(isRecordableSessionHostname('dsw-883935-74b9658444-624v7')).toBe(
+    expect(isRecordableSessionHostname('dsw-example-worker')).toBe(
       true,
     )
   })
@@ -75,9 +75,9 @@ describe('isRecordableSessionHostname', () => {
 describe('getRecordedSessionHostname', () => {
   test('linux dsw host: records hostname iff RESUME_HOSTNAME enabled', () => {
     setPlatform('linux')
-    mockHostname('dsw-883935-74b9658444-624v7')
+    mockHostname('dsw-example-worker')
     if (feature('RESUME_HOSTNAME')) {
-      expect(getRecordedSessionHostname()).toBe('dsw-883935-74b9658444-624v7')
+      expect(getRecordedSessionHostname()).toBe('dsw-example-worker')
     } else {
       expect(getRecordedSessionHostname()).toBeUndefined()
     }

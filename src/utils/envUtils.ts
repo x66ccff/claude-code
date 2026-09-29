@@ -32,7 +32,7 @@ export function hasNodeOption(flag: string): boolean {
 
 /**
  * Hostnames of Alibaba PAI containers start with dsw-/dlc- (e.g.
- * dsw-883935-74b9658444-624v7). Exported so the read side can validate
+ * dsw-example-worker). Exported so the read side can validate
  * string-scraped JSONL values with the same predicate used at write time.
  */
 export function isRecordableSessionHostname(host: string): boolean {
