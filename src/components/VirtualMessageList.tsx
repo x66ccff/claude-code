@@ -272,19 +272,34 @@ export function VirtualMessageList({
   // the full string array on every commit allocates O(n) per message (~1MB
   // churn at 27k messages). Append-only delta push when the prefix matches;
   // fall back to full rebuild on compaction, /clear, or itemKey change.
+  //
+  // The prefix MUST be verified per element. Messages.tsx reorders the list
+  // between commits (reorderMessagesInUI moves a tool result up next to its
+  // tool_use) while the first element — the compact-boundary system message —
+  // stays identical, so checking messages[0] alone proved nothing and the
+  // stale prefix was kept. The pushed tail key then collided with an existing
+  // key; duplicate keys feed duplicate entries into useVirtualScroll's
+  // key-addressed height/ref caches, which renders stale rows in place and
+  // shows historical tool blocks repeatedly while scrolling up.
   const keysRef = useRef<string[]>([]);
-  const prevMessagesRef = useRef<typeof messages>(messages);
+  const prevMessagesRef = useRef<typeof messages | null>(null);
   const prevItemKeyRef = useRef(itemKey);
-  if (
-    prevItemKeyRef.current !== itemKey ||
-    messages.length < keysRef.current.length ||
-    messages[0] !== prevMessagesRef.current[0]
-  ) {
-    keysRef.current = messages.map(m => itemKey(m));
-  } else {
+  const prev = prevMessagesRef.current;
+  let appendOnly = prev !== null && prevItemKeyRef.current === itemKey && messages.length >= prev.length;
+  if (appendOnly && prev !== null) {
+    for (let i = 0; i < prev.length; i++) {
+      if (messages[i]!.uuid !== prev[i]!.uuid) {
+        appendOnly = false;
+        break;
+      }
+    }
+  }
+  if (appendOnly) {
     for (let i = keysRef.current.length; i < messages.length; i++) {
       keysRef.current.push(itemKey(messages[i]!));
     }
+  } else {
+    keysRef.current = messages.map(m => itemKey(m));
   }
   prevMessagesRef.current = messages;
   prevItemKeyRef.current = itemKey;
